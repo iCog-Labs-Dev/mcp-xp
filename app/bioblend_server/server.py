@@ -19,7 +19,6 @@ from app.bioblend_server.mcp_context import current_api_key_server
 from app.bioblend_server.utils import (
     InformerResponse,
     DefaultTextResponses,
-    JWTGalaxyKeyMiddleware,
     get_llm_response,
     analyze_invocation,
     fetch_workflow_json_async
