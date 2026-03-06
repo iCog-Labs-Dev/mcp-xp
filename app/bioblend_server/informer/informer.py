@@ -10,6 +10,7 @@ import re
 import logging
 import asyncio
 from typing import List, Dict
+from rapidfuzz import process, fuzz
 
 from sys import path
 path.append(".")
@@ -282,7 +283,31 @@ class GalaxyInformer:
             self.log.error(f"Could not retrieve details for {self.entity_type}:{entity_id}: {e}")
             return {"error": "Failed to retrieve details."}
         
+
+    def clean_galaxy_context(self, text_list):
+        """ 
+        Cleans a list of Galaxy context strings (tools, workflows, datasets)
+        for feeding into an LLM.
+        """
+        cleaned = []
+        for text in text_list:
+            # Remove Markdown links but keep text
+            text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+            # Remove URLs
+            text = re.sub(r'https?://\S+', '', text)
+            # Remove quotes
+            text = re.sub(r'["\']', '', text)
+            # Remove brackets
+            text = re.sub(r'[\[\]\{\}]', '', text)
+            # Remove parentheses content (annotations)
+            text = re.sub(r'\([^\)]*\)', '', text)
+            # Collapse multiple spaces and strip
+            text = re.sub(r'\s+', ' ', text).strip()
+            if text:
+                cleaned.append(text)
+        return cleaned
  
+
     async def generate_final_response(self, query: str, retrieved_contents: list = None, cached_summaries: list[str] = None, global_content: list = None , action_lookup: dict[str, dict] = None):
         """Generates a final, user-facing natural language response based on the retrieved and processed information."""
         
@@ -315,10 +340,13 @@ class GalaxyInformer:
             all_results.extend(cached_summaries)
         
         if all_results:        
+            all_results = self.clean_galaxy_context(all_results)
             query_responses = "\n\n\n".join(str(r) for r in all_results if r)
         
         if global_content:
+            global_content = self.clean_galaxy_context(global_content)
             global_responses = "\n\n\n".join(str(r) for r in global_content if r)
+            self.log.info(f'context of the context: {global_responses}')
         
         if not query_responses.strip():
             self.log.info(f"No suitable {self.entity_type}s found in the users galaxy instance for the users needs.")
@@ -334,11 +362,21 @@ class GalaxyInformer:
         self.log.info(f"Final response: {final_message}")
         # return response_text
         
-        actions = {
-            name: action_lookup[name]
-            for name in action_lookup
-            if re.search(rf"\b{re.escape(name)}\b", final_message, re.IGNORECASE)
-        }
+        actions = {}
+        if action_lookup:
+            action_names = list(action_lookup.keys())
+            best_match = process.extractOne(
+                query=final_message,
+                choices=action_names,
+                scorer=fuzz.token_set_ratio,   # best for LLM-style rephrasing / partial matches
+                score_cutoff=70                         # tune if needed (70-85 range is usually perfect)
+            )
+            if best_match:
+                name, score, _ = best_match
+                actions[name] = action_lookup[name]
+                self.log.info(f"Best fuzzy action match: {name} (score: {score})")
+            else:
+                self.log.info("No action matched with sufficient confidence (score < 75)")
         
         return final_message, actions
 
@@ -383,10 +421,6 @@ class GalaxyInformer:
             if item_stub.get("source") == "user_instance":
                 item_id = item_stub.get(id_field)
                 if item_id:
-                    cached_summary = self.cache.get_string(key = f"{self.username}_{self.entity_type}_{item_id}")
-                    if cached_summary:
-                        cached_summaries.append(cached_summary)
-                        continue
                     
                     if self.entity_type == "workflow":
                         tasks.append(self.get_entity_details(entity_id = item_id, action_lookup = action_lookup, content= item_content))
@@ -395,7 +429,7 @@ class GalaxyInformer:
             else:
                 global_results.append(item_content)
                 if self.entity_type == "workflow":
-                    item_name = item_content["name"]
+                    item_name = item_stub["name"]
                     action_lookup[item_name] = {
                         "action" : "Import",
                         "link": None
