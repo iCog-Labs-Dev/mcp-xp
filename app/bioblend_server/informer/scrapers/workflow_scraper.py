@@ -332,6 +332,7 @@ class GalaxyWorkflowScraper:
                 {
                     "name": chosen_workflow_name or repo.get("workflow_repository", ""),
                     "description": description,
+                    "source": "iwc",
                     "owner": owner,
                     "raw_download_url": chosen_raw_url or "",
                     "content": content,
@@ -437,6 +438,7 @@ class WorkflowHubScraper:
                 {
                     "name": name,
                     "description": description,
+                    "source": "workflow_hub",
                     "owner": tool.get("organization", "WorkflowHub"),
                     "raw_download_url": f"{self.trs_base_url}/tools/{tool['id']}/versions/{version_id}/GALAXY/descriptor",
                     "content": img_string,

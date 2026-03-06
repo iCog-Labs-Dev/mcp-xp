@@ -46,8 +46,8 @@ class MCPActions(BaseModel):
 class InformerResponse(BaseModel):
     """The Galaxy Informer tool response schema."""
     
-    response: set
-    actions: MCPActions
+    response: str
+    actions: dict[str,MCPActions]
     
 class DefaultTextResponses(BaseModel):
     """Default Text repsponse of the MCP server."""

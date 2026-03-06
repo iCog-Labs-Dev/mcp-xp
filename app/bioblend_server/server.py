@@ -1,4 +1,6 @@
 import os
+import re
+import json
 from fastmcp import FastMCP
 import logging
 from typing import Optional
@@ -64,7 +66,7 @@ async def mcp_galaxy_lifespan(server: FastMCP):
 # ==================================== #
 
 bioblend_app = FastMCP(
-                    name="GalaxyMcpAssistant",
+                    name="galaxyTools",
                     instructions="""
                             Galaxy MCP assistant.
                             Provide information on Galaxy tools, datasets, workflows, and invocations.
@@ -72,8 +74,7 @@ bioblend_app = FastMCP(
                             Import recommended workflows when requested.
                             
                             """,
-                    middleware=[JWTGalaxyKeyMiddleware()],
-                    lifespan=mcp_galaxy_lifespan
+                    middleware=[JWTGalaxyKeyMiddleware()]
                     )
 
 
@@ -247,7 +248,8 @@ async def import_workflow_to_galaxy_instance(
 
         # TODO: Fill the workflow collection name (has to be user-specific, so ...)
         workflow_collection_name: str = "generic_galaxy_workflow"
-
+        workflow_name_alternative = re.sub(r'workflow', '', workflow_name, flags= re.IGNORECASE) # if there are any uneccessary strings included in the parameter.
+        
         # Step 1: Search for the workflow by name in metadata (synchronous call in thread pool)
         logger.info(f"Searching for workflow '{workflow_name}' in collection '{workflow_collection_name}'.")
         logger.info(f"current Galaxy MCP server user: {username}")
@@ -257,22 +259,36 @@ async def import_workflow_to_galaxy_instance(
             )
 
         if not hits or not hits[0]:
-            logger.warning(f"Workflow '{workflow_name}' not found in collection '{workflow_collection_name}'")
-            return f"Workflow '{workflow_name}' not found in available workflow collection for import."
-
-        # Extract workflow download URL from point payload
+            
+            hits = await qdrant_client.match_name_from_collection(
+            workflow_collection_name=workflow_collection_name,
+            workflow_name = workflow_name_alternative
+            )
+            
+            if not hits or not hits[0]:
+                logger.warning(f"Workflow '{workflow_name}' not found in collection '{workflow_collection_name}'")
+                response =  f"Workflow '{workflow_name}' not found in available workflow collection for import."
+                return DefaultTextResponses(response = response)
+            
+            # Extract workflow download URL from point payload
         point: PointStruct = hits[0][0]
         workflow_url: Optional[str] = point.payload.get("raw_download_url")
+        workflow_source = point.payload.get("source")
         
         if not workflow_url:
             logger.error(f"No download link found for workflow '{workflow_name}'")
-            return f"Couldn't import workflow '{workflow_name}'."
-
+            response = f"Couldn't import workflow '{workflow_name}'."
+            return DefaultTextResponses(response = response)
+        
         # Fetch the workflow JSON
         logger.info(f"Fetching workflow JSON from IWC repository using URL: {workflow_url}")
         workflow_json: dict = await fetch_workflow_json_async(workflow_url)
 
-        # TODO: Ensure that getting the workflow name is correct.
+        if workflow_source == "workflow_hub":
+            workflow_json: dict = workflow_json.get("content")
+            if isinstance(workflow_json, str):
+                workflow_json = json.loads(workflow_json)
+
         ga_workflow_name: str = workflow_json.get("name", workflow_json.get("workflow_name", ""))
         if not ga_workflow_name:
             logger.error(f"Workflow JSON does not contain a 'name' field for '{workflow_name}'")
@@ -313,8 +329,8 @@ async def import_workflow_to_galaxy_instance(
     
     except ValueError as val_err:
         logger.error(f"Validation error: {str(val_err)}")
-        return DefaultTextResponses("An unexpected error occurred during workflow import.")
+        return DefaultTextResponses(response = "An unexpected error occurred during workflow import.")
     
     except Exception as exc:
         logger.exception(f"Unexpected error during workflow import: {str(exc)}")
-        return DefaultTextResponses("An unexpected error occurred during workflow import.")
+        return DefaultTextResponses(response = "An unexpected error occurred during workflow import.")
