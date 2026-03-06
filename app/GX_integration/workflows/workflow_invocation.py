@@ -587,8 +587,13 @@ class WorkflowInvocationHandler:
                 break
             
             if all_ok:
-                confirmation_check = True
-                self.log.info("Scheduled jobs are complete, confirming there are no more jobs to be sheduling")
+                #TODO: Make this an Enum for setting the limit easier. 
+                if completed_step_count > (num_steps - 5) :
+                    self.log.info("Most of the Scheduled jobs are complete, confirming there are no more jobs to be sheduled")
+                    confirmation_check = True
+                else:
+                    self.log.info("some of the scheduled jobs have not been complete.")
+                    
                 await asyncio.sleep(2)
                 
             
