@@ -108,7 +108,7 @@ class InvocationService:
                 )
                 
                 if not invocations_data:
-                    self.log.warning("No invocations data retrieved | found.")
+                    self.log.warning("No invocations data retrieved found.")
                     return invocation.InvocationList(invocations=[])
                 
                 structured_invocation_ids = await self.mongo_client.get(

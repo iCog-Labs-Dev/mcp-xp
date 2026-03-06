@@ -156,32 +156,33 @@ class OpenAIProvider(LLMProvider):
         # Generation config: same fields as before, mapped to SDK names
         generation_config = {
             "temperature": self.config.config_data.get("temperature", 0.7),
-            "max_tokens": self.config.config_data.get("max_tokens", 10000),
             "top_p": self.config.config_data.get("top_p", 1),
             "stop": self.config.config_data.get("stop", []),
         }
 
         model_name = self.config.config_data.get("model")
+        sem = asyncio.Semaphore(1)
 
-        try:
-            # Mirror the previous 10s timeout
-            response = await self.client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                **generation_config,
-                timeout=10.0,
-            )
-
-            content = response.choices[0].message.content
-            json_content = _extract_json_from_llm_response(content)
+        async with sem:
             try:
-                return json.loads(json_content)
-            except json.JSONDecodeError:
-                return json_content
+                # Mirror the previous 10s timeout
+                response = await self.client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    timeout=60.0,
+                    **generation_config
+                )
 
-        except Exception as e:
-            self.log.error(f"OpenAI API error: {str(e)}")
-            raise RuntimeError(f"OpenAI API error: {str(e)}") from e
+                content = response.choices[0].message.content
+                json_content = _extract_json_from_llm_response(content)
+                try:
+                    return json.loads(json_content)
+                except json.JSONDecodeError:
+                    return json_content
+
+            except Exception as e:
+                self.log.error(f"OpenAI API error: {str(e)}")
+                raise RuntimeError(f"OpenAI API error: {str(e)}") from e
 
     async def embedding_model(self, batch: List[str]) -> List[List[float]]:
         """

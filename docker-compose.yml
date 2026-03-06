@@ -7,6 +7,7 @@ services:
     env_file:
       - .env
     environment:
+      - OPENAI_API_KEY=${OPENAI_API}
       - APP_PORT=${APP_PORT}
       - MCP_PORT=${MCP_PORT}
       - REDIS_PORT=${REDIS_PORT}
@@ -14,6 +15,7 @@ services:
       - QDRANT_HOST=qdrant
       - QDRANT_HTTP_PORT=${QDRANT_HTTP_PORT}
       - CURRENT_LLM=${CURRENT_LLM:-openai} # Set current LLM to run the MCP server with, defaults to openai.
+      - CURRENT_EMBEDDER=${CURRENT_EMBEDDER}
       - MONGO_HOST=mongo
       - MONGO_PORT=${MONGO_PORT}
     ports:

@@ -15,7 +15,7 @@ mkdir -p /app/logs
 
 # Start BioBlend server in background with logging to file + terminal
 echo "Starting BioBlend server on port $MCP_PORT..."
-python -m app.bioblend_server --port "$MCP_PORT" \
+python -m app.bioblend_server --host 0.0.0.0 --port "$MCP_PORT" \
     2>&1 | tee /app/logs/MCP_server.log &
 
 # Start Uvicorn app in background with logging to file + terminal

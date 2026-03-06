@@ -21,7 +21,7 @@ class NumericLimits(IntEnum):
 class TTLiveConfig(IntEnum):
     """ Centralizing TTL for invocation and worklows. """
     
-    WORKFLOW_CACHE = 600
+    WORKFLOW_CACHE = 5
     INVOCATION_WORKFLOW_MAPPING = 120
     INVOCATION_LIST = 10
     RAW_INVOCATION_LIST = 10

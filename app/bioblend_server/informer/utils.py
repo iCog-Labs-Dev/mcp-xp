@@ -88,7 +88,7 @@ class LLMResponse:
     @property
     def embedder(self) -> LLMProvider:
         provider = EmbeddingProvider(os.getenv("CURRENT_EMBEDDER", EmbeddingProvider.GEMINI.value)).value
-        selected_config = LLMModelConfig(self.config['providers']["gemini"])
+        selected_config = LLMModelConfig(self.config['providers']["openai"])
         if provider == EmbeddingProvider.GEMINI.value:
             return GeminiProvider(model_config=selected_config)
         elif provider == EmbeddingProvider.OPENAI.value:
