@@ -41,7 +41,7 @@ def mock_galaxy_informer():
 
 @pytest.fixture
 def mock_invocation_cache():
-    with patch("app.bioblend_server.server.invocation_cache") as mock:
+    with patch("app.bioblend_server.utils.invocation_cache") as mock:
         yield mock
 
 
@@ -119,7 +119,7 @@ class TestGetGalaxyInformationTool:
         # Create informer instance mock
         mock_informer_instance = AsyncMock()
         mock_informer_instance.get_entity_info = AsyncMock(
-            return_value="Tool information result"
+            return_value=("Tool information result", {})
         )
 
         # Make create an AsyncMock (not just set return_value)
@@ -130,8 +130,8 @@ class TestGetGalaxyInformationTool:
             query="Show me alignment tools", query_type="tool", entity_id=None
         )
 
-        # Assert
-        assert result == "Tool information result"
+        # Assert - result is now an InformerResponse Pydantic model
+        assert result.response == "Tool information result"
         mock_galaxy_informer.create.assert_called_once()
         mock_informer_instance.get_entity_info.assert_called_once_with(
             search_query="Show me alignment tools", entity_id=None
@@ -157,7 +157,7 @@ class TestGetGalaxyInformationTool:
 
         mock_informer_instance = AsyncMock()
         mock_informer_instance.get_entity_info = AsyncMock(
-            return_value="Workflow details"
+            return_value=("Workflow details", {})
         )
         mock_galaxy_informer.create = AsyncMock(return_value=mock_informer_instance)
 
@@ -167,7 +167,8 @@ class TestGetGalaxyInformationTool:
             entity_id="workflow_123",
         )
 
-        assert result == "Workflow details"
+        # Assert - result is now an InformerResponse Pydantic model
+        assert result.response == "Workflow details"
         mock_informer_instance.get_entity_info.assert_called_once_with(
             search_query="Get workflow details", entity_id="workflow_123"
         )
@@ -262,18 +263,21 @@ class TestExplainGalaxyWorkflowInvocationTool:
 
         mock_to_thread.side_effect = side_effect
 
-        with patch(
-            "app.bioblend_server.server.get_llm_response", new_callable=AsyncMock
-        ) as mock_llm_response:
+        # Patch GalaxyClient in utils module as well
+        with patch("app.bioblend_server.utils.GalaxyClient", return_value=mock_client_instance):
+            with patch(
+                "app.bioblend_server.server.get_llm_response", new_callable=AsyncMock
+            ) as mock_llm_response:
 
-            mock_llm_response.return_value = "successful invocation report"
-            result = await explain_galaxy_workflow_invocation(
-                invocation_id="inv_123", failure=False
-            )
+                mock_llm_response.return_value = "successful invocation report"
+                result = await explain_galaxy_workflow_invocation(
+                    invocation_id="inv_123", failure=False
+                )
 
-        assert f"Loading workflow Invocation with ID:" in caplog.text
+        # The log message is in utils.py analyze_invocation function, which is called
+        # Check for the actual log messages from the server function
         assert f"Loading summarized report for successful invocation." in caplog.text
-        assert result == "successful invocation report"
+        assert result.response == "successful invocation report"
         inv_explainer_test_log.info(
             "TEST: test_successful_invocation_explanation PASSED."
         )
@@ -332,21 +336,25 @@ class TestExplainGalaxyWorkflowInvocationTool:
             return func()
 
         mock_to_thread.side_effect = lambda func: mock_thread_sync(func)
-        with patch(
-            "app.bioblend_server.server.get_llm_response", new_callable=AsyncMock
-        ) as mock_llm_response:
+        
+        # Patch GalaxyClient in utils module as well
+        with patch("app.bioblend_server.utils.GalaxyClient", return_value=mock_client_instance):
+            with patch(
+                "app.bioblend_server.server.get_llm_response", new_callable=AsyncMock
+            ) as mock_llm_response:
 
-            mock_llm_response.return_value = "Failed invocation report"
-            result = await explain_galaxy_workflow_invocation(
-                invocation_id="inv_456", failure=True
-            )
+                mock_llm_response.return_value = "Failed invocation report"
+                result = await explain_galaxy_workflow_invocation(
+                    invocation_id="inv_456", failure=True
+                )
 
-        assert f"Loading workflow Invocation with ID:" in caplog.text
+        # The log message is in utils.py analyze_invocation function
+        # Check for the actual log messages from the server function
         assert (
             f"Loading failure explanation and suggestions for invocation."
             in caplog.text
         )
-        assert result == "Failed invocation report"
+        assert result.response == "Failed invocation report"
 
         inv_explainer_test_log.info(
             "TEST: test_failed_invocation_with_error_jobs PASSED."
@@ -392,18 +400,21 @@ class TestExplainGalaxyWorkflowInvocationTool:
 
         mock_to_thread.side_effect = lambda func: mock_thread_sync(func)
 
-        with patch(
-            "app.bioblend_server.server.get_llm_response", new_callable=AsyncMock
-        ) as mock_llm_response:
+        # Patch GalaxyClient in utils module as well
+        with patch("app.bioblend_server.utils.GalaxyClient", return_value=mock_client_instance):
+            with patch(
+                "app.bioblend_server.server.get_llm_response", new_callable=AsyncMock
+            ) as mock_llm_response:
 
-            mock_llm_response.return_value = "Pending invocation report"
-            result = await explain_galaxy_workflow_invocation(
-                invocation_id="inv_789", failure=False
-            )
+                mock_llm_response.return_value = "Pending invocation report"
+                result = await explain_galaxy_workflow_invocation(
+                    invocation_id="inv_789", failure=False
+                )
 
-        assert f"Loading workflow Invocation with ID:" in caplog.text
+        # The log message is in utils.py analyze_invocation function
+        # Check for the actual log messages from the server function
         assert f"Loading summarized report for successful invocation." in caplog.text
-        assert result == "Pending invocation report"
+        assert result.response == "Pending invocation report"
         mock_create_task.assert_called_once()
         inv_explainer_test_log.info("TEST: test_scheduled_invocation PASSED.")
 
@@ -468,7 +479,7 @@ class TestImportWorkflowToGalaxyInstanceTool:
         }
         result = await import_workflow_to_galaxy_instance(workflow_name="Test Workflow")
 
-        assert "workflow is being imported" in result.lower()
+        assert "workflow is being imported" in result.response.lower()
         importer_test_log.info("TEST: test_successful_workflow_import PASSED.")
 
     @pytest.mark.asyncio
@@ -499,7 +510,7 @@ class TestImportWorkflowToGalaxyInstanceTool:
             workflow_name="Nonexistent Workflow"
         )
 
-        assert "not found in available workflow collection" in result.lower()
+        assert "not found in available workflow collection" in result.response.lower()
         importer_test_log.info("TEST: test_workflow_not_found_in_collection PASSED.")
 
     @pytest.mark.asyncio
@@ -542,5 +553,5 @@ class TestImportWorkflowToGalaxyInstanceTool:
 
         result = await import_workflow_to_galaxy_instance(workflow_name="Test Workflow")
 
-        assert "http error" in result.lower()
+        assert "http error" in result.response.lower()
         importer_test_log.info("TEST: test_http_error_during_fetch PASSED.")

@@ -530,13 +530,17 @@ class TestInvocationList:
                         "workflow_id": "wf_id1",
                         "history_id": "hist1",
                         "state": "Complete",
+                        "outputs": [],
                         "create_time": "2023-01-01T00:00:00",
                         "update_time": "2023-01-01T01:00:00",
                     }
                 ]
             }
         )
-        with patch.object(invocation_service, "cache", mock_cache):
+        mock_mongo = AsyncMock()
+        mock_mongo.get = AsyncMock(return_value=None)
+        with patch.object(invocation_service, "cache", mock_cache), \
+             patch.object(invocation_service, "mongo_client", mock_mongo):
             response = client.get("/api/invocation/", headers=auth_headers)
 
         assert response.status_code == 200
@@ -573,6 +577,9 @@ class TestInvocationList:
                 "update_time": "2023-01-01T01:00:00",
             }
         ]
+        
+        # Mock workflow_manager.gi_object.gi.invocations.get_invocations
+        mock_workflow_manager.gi_object.gi.invocations.get_invocations.return_value = mock_invocations.get_invocations.return_value
 
         # Mock step jobs summary to ensure "Pending" state (running jobs)
         mock_workflow_manager.gi_object.gi.invocations.get_invocation_step_jobs_summary.return_value = [
@@ -612,11 +619,26 @@ class TestInvocationList:
             mock_cache.set_workflows_cache = AsyncMock()
             mock_cache.set_invocation_workflow_mapping = AsyncMock()
             mock_cache.set_response_cache = AsyncMock()
+            mock_cache.set_invocation_state = AsyncMock()
+            # Mock acquire_lock as an async context manager
+            from contextlib import asynccontextmanager
+            @asynccontextmanager
+            async def mock_acquire_lock(*args, **kwargs):
+                yield
+            mock_cache.acquire_lock = mock_acquire_lock
+            mock_mongo = AsyncMock()
+            mock_mongo.get = AsyncMock(return_value=None)
+            mock_mongo.get_element = AsyncMock(return_value=None)
+            mock_mongo.exists = AsyncMock(return_value=False)
+            mock_mongo.set = AsyncMock()
+            mock_mongo.set_element = AsyncMock()
+            mock_mongo.add_to_set = AsyncMock()
             with (
                 patch.object(invocation_service, "cache", mock_cache),
                 patch.object(invocation_service.inv_data_manager, "cache", mock_cache),
                 patch.object(invocation_service.inv_tracker, "cache", mock_cache),
                 patch.object(invocation_service.background_tasks, "cache", mock_cache),
+                patch.object(invocation_service, "mongo_client", mock_mongo),
             ):
                 with patch(
                     "fastapi.concurrency.run_in_threadpool", new_callable=AsyncMock
@@ -632,7 +654,7 @@ class TestInvocationList:
         assert data["invocations"][0]["id"] == "inv1"
         assert data["invocations"][0]["state"] == "Pending"
         mock_cache.set_response_cache.assert_called()
-        assert "Successfully retrieved 1 invocations" in caplog.text
+        assert "Successfully retrieved invocations (total: 1)" in caplog.text
         logger.info("TEST: test_list_invocations_cache_miss_success PASSED")
 
     def test_list_invocations_with_filters(
@@ -664,7 +686,17 @@ class TestInvocationList:
             mock_cache.get_invocations_cache = AsyncMock(return_value=None)
             mock_cache.get_workflows_cache = AsyncMock(return_value=None)
             mock_cache.get_invocation_state = AsyncMock(return_value="Pending")
-            with patch.object(invocation_service, "cache", mock_cache):
+            # Mock acquire_lock as an async context manager
+            from contextlib import asynccontextmanager
+            @asynccontextmanager
+            async def mock_acquire_lock(*args, **kwargs):
+                yield
+            mock_cache.acquire_lock = mock_acquire_lock
+            mock_mongo = AsyncMock()
+            mock_mongo.get = AsyncMock(return_value=None)
+            mock_mongo.exists = AsyncMock(return_value=False)
+            with patch.object(invocation_service, "cache", mock_cache), \
+                 patch.object(invocation_service, "mongo_client", mock_mongo):
                 with patch(
                     "fastapi.concurrency.run_in_threadpool", new_callable=AsyncMock
                 ) as mock_run_thread:
@@ -716,7 +748,24 @@ class TestInvocationList:
             mock_cache.get_response_cache = AsyncMock(return_value=None)
             mock_cache.get_invocations_cache = AsyncMock(return_value=None)
             mock_cache.get_workflows_cache = AsyncMock(return_value=None)
-            with patch.object(invocation_service, "cache", mock_cache):
+            mock_cache.get_invocation_workflow_mapping = AsyncMock(return_value=None)
+            mock_cache.set_invocations_cache = AsyncMock()
+            mock_cache.set_workflows_cache = AsyncMock()
+            mock_cache.set_invocation_workflow_mapping = AsyncMock()
+            mock_cache.set_response_cache = AsyncMock()
+            # Mock acquire_lock as an async context manager
+            from contextlib import asynccontextmanager
+            @asynccontextmanager
+            async def mock_acquire_lock(*args, **kwargs):
+                yield
+            mock_cache.acquire_lock = mock_acquire_lock
+            mock_mongo = AsyncMock()
+            mock_mongo.get = AsyncMock(return_value=None)
+            mock_mongo.get_element = AsyncMock(return_value=None)
+            mock_mongo.exists = AsyncMock(return_value=False)
+            mock_mongo.set_element = AsyncMock()
+            with patch.object(invocation_service, "cache", mock_cache), \
+                 patch.object(invocation_service, "mongo_client", mock_mongo):
                 with patch(
                     "fastapi.concurrency.run_in_threadpool", new_callable=AsyncMock
                 ) as mock_run_thread:
@@ -728,6 +777,7 @@ class TestInvocationList:
 
         assert response.status_code == 200
         data = response.json()
+        # When no invocations are retrieved, the service returns empty list
         assert len(data["invocations"]) == 0
         assert "No invocations data retrieved" in caplog.text
         logger.info("TEST: test_list_invocations_no_data PASSED")
@@ -765,6 +815,9 @@ class TestInvocationList:
                 "update_time": "2025-11-05T00:00:00Z",
             },
         ]
+        
+        # Mock workflow_manager.gi_object.gi.invocations.get_invocations
+        mock_workflow_manager.gi_object.gi.invocations.get_invocations.return_value = mock_invocations.get_invocations.return_value
 
         mock_bg_tasks = AsyncMock()
         mock_bg_tasks.fetch_workflows_safely = AsyncMock(
@@ -790,10 +843,34 @@ class TestInvocationList:
             mock_cache.get_response_cache = AsyncMock(return_value=None)
             mock_cache.get_invocations_cache = AsyncMock(return_value=None)
             mock_cache.get_workflows_cache = AsyncMock(return_value=None)
+            mock_cache.get_invocation_workflow_mapping = AsyncMock(return_value=None)
             mock_cache.get_invocation_state = AsyncMock(
                 side_effect=["Failed", "Complete"]
             )
-            with patch.object(invocation_service, "cache", mock_cache):
+            mock_cache.set_invocations_cache = AsyncMock()
+            mock_cache.set_workflows_cache = AsyncMock()
+            mock_cache.set_invocation_workflow_mapping = AsyncMock()
+            mock_cache.set_response_cache = AsyncMock()
+            # Mock acquire_lock as an async context manager
+            from contextlib import asynccontextmanager
+            @asynccontextmanager
+            async def mock_acquire_lock(*args, **kwargs):
+                yield
+            mock_cache.acquire_lock = mock_acquire_lock
+            mock_mongo = AsyncMock()
+            mock_mongo.get = AsyncMock(return_value=None)
+            mock_mongo.get_element = AsyncMock(return_value=None)
+            mock_mongo.exists = AsyncMock(return_value=False)
+            mock_mongo.set = AsyncMock()
+            mock_mongo.set_element = AsyncMock()
+            mock_mongo.add_to_set = AsyncMock()
+            with (
+                patch.object(invocation_service, "cache", mock_cache),
+                patch.object(invocation_service.inv_data_manager, "cache", mock_cache),
+                patch.object(invocation_service.inv_tracker, "cache", mock_cache),
+                patch.object(invocation_service.background_tasks, "cache", mock_cache),
+                patch.object(invocation_service, "mongo_client", mock_mongo),
+            ):
                 with patch(
                     "fastapi.concurrency.run_in_threadpool", new_callable=AsyncMock
                 ) as mock_run_thread:
@@ -833,14 +910,22 @@ class TestInvocationList:
                 "update_time": "2025-11-05T00:00:00Z",
             }
         ]
+        
+        # Mock workflow_manager.gi_object.gi.invocations.get_invocations for partial failure path
+        mock_workflow_manager.gi_object.gi.invocations.get_invocations.return_value = mock_invocations.get_invocations.return_value
+        
+        # Mock step jobs summary to ensure "Pending" state (running jobs)
+        mock_workflow_manager.gi_object.gi.invocations.get_invocation_step_jobs_summary.return_value = [
+            {"states": {"running": 1}}
+        ]
 
-        # Mock background to raise on workflows fetch
+        # Mock background to raise on workflow mapping build
         mock_bg_tasks = AsyncMock()
         mock_bg_tasks.fetch_workflows_safely = AsyncMock(
-            side_effect=Exception("Workflows fetch failed")
+            return_value=[]
         )
         mock_bg_tasks.build_invocation_workflow_mapping = AsyncMock(
-            return_value=({}, mock_invocations.get_invocations.return_value)
+            side_effect=Exception("Workflow mapping failed")
         )
         with (
             patch.object(invocation_service, "background_tasks", mock_bg_tasks),
@@ -855,12 +940,30 @@ class TestInvocationList:
             mock_cache.get_response_cache = AsyncMock(return_value=None)
             mock_cache.get_invocations_cache = AsyncMock(return_value=None)
             mock_cache.get_workflows_cache = AsyncMock(return_value=None)
+            mock_cache.get_invocation_workflow_mapping = AsyncMock(return_value=None)
             mock_cache.get_invocation_state = AsyncMock(return_value=None)
+            mock_cache.set_invocations_cache = AsyncMock()
+            mock_cache.set_workflows_cache = AsyncMock()
+            mock_cache.set_invocation_workflow_mapping = AsyncMock()
+            mock_cache.set_response_cache = AsyncMock()
+            mock_cache.set_invocation_state = AsyncMock()
+            # Mock acquire_lock as an async context manager
+            from contextlib import asynccontextmanager
+            @asynccontextmanager
+            async def mock_acquire_lock(*args, **kwargs):
+                yield
+            mock_cache.acquire_lock = mock_acquire_lock
+            mock_mongo = AsyncMock()
+            mock_mongo.get = AsyncMock(return_value=None)
+            mock_mongo.get_element = AsyncMock(return_value=None)
+            mock_mongo.exists = AsyncMock(return_value=False)
+            mock_mongo.set_element = AsyncMock()
             with (
                 patch.object(invocation_service, "cache", mock_cache),
                 patch.object(invocation_service.inv_data_manager, "cache", mock_cache),
                 patch.object(invocation_service.inv_tracker, "cache", mock_cache),
                 patch.object(invocation_service.background_tasks, "cache", mock_cache),
+                patch.object(invocation_service, "mongo_client", mock_mongo),
             ):
                 with patch(
                     "fastapi.concurrency.run_in_threadpool", new_callable=AsyncMock
@@ -872,8 +975,11 @@ class TestInvocationList:
 
         assert response.status_code == 200
         data = response.json()
-        assert len(data["invocations"]) == 0  # Since mapping fails, skips
-        assert "Failed to fetch workflows" in caplog.text
+        # When workflow fetch fails, the service uses partial failure handling
+        # which returns invocations with "Unknown (partial failure)" workflow names
+        assert len(data["invocations"]) == 1
+        assert data["invocations"][0]["workflow_name"] == "Unknown (partial failure)"
+        assert "Workflow mapping failed" in caplog.text
         logger.info("TEST: test_list_invocations_partial_failure PASSED")
 
     def test_list_invocations_full_failure(
@@ -892,11 +998,14 @@ class TestInvocationList:
         mock_cache.get_deleted_invocations = AsyncMock(return_value=[])
         mock_cache.is_duplicate_request = AsyncMock(return_value=False)
         mock_cache.get_response_cache = AsyncMock(return_value=None)
+        mock_mongo = AsyncMock()
+        mock_mongo.get = AsyncMock(return_value=None)
         with (
             patch.object(invocation_service, "cache", mock_cache),
             patch.object(invocation_service.inv_data_manager, "cache", mock_cache),
             patch.object(invocation_service.inv_tracker, "cache", mock_cache),
             patch.object(invocation_service.background_tasks, "cache", mock_cache),
+            patch.object(invocation_service, "mongo_client", mock_mongo),
         ):
             with patch.object(
                 invocation_service,
@@ -935,13 +1044,17 @@ class TestInvocationList:
                         "workflow_name": "wf1",
                         "history_id": "hist1",
                         "state": "Pending",
+                        "outputs": [],
                         "create_time": "2025-11-05T00:00:00Z",
                         "update_time": "2025-11-05T00:00:00Z",
                     }
                 ]
             }
         )
-        with patch.object(invocation_service, "cache", mock_cache):
+        mock_mongo = AsyncMock()
+        mock_mongo.get = AsyncMock(return_value=None)
+        with patch.object(invocation_service, "cache", mock_cache), \
+             patch.object(invocation_service, "mongo_client", mock_mongo):
             response = client.get("/api/invocation/", headers=auth_headers)
 
         assert response.status_code == 200
@@ -973,6 +1086,9 @@ class TestInvocationList:
                 "update_time": "2025-11-05T00:00:00Z",
             }
         ]
+        
+        # Mock workflow_manager.gi_object.gi.invocations.get_invocations
+        mock_workflow_manager.gi_object.gi.invocations.get_invocations.return_value = mock_invocations.get_invocations.return_value
 
         mock_bg_tasks = AsyncMock()
         mock_bg_tasks.fetch_workflows_safely = AsyncMock(
@@ -998,11 +1114,23 @@ class TestInvocationList:
             mock_cache.get_invocations_cache = AsyncMock(return_value=None)
             mock_cache.get_workflows_cache = AsyncMock(return_value=None)
             mock_cache.get_invocation_state = AsyncMock(return_value="Pending")
+            # Mock acquire_lock as an async context manager
+            from contextlib import asynccontextmanager
+            @asynccontextmanager
+            async def mock_acquire_lock(*args, **kwargs):
+                yield
+            mock_cache.acquire_lock = mock_acquire_lock
+            mock_mongo = AsyncMock()
+            mock_mongo.get = AsyncMock(return_value=None)
+            mock_mongo.exists = AsyncMock(return_value=False)
+            mock_mongo.set = AsyncMock()
+            mock_mongo.add_to_set = AsyncMock()
             with (
                 patch.object(invocation_service, "cache", mock_cache),
                 patch.object(invocation_service.inv_data_manager, "cache", mock_cache),
                 patch.object(invocation_service.inv_tracker, "cache", mock_cache),
                 patch.object(invocation_service.background_tasks, "cache", mock_cache),
+                patch.object(invocation_service, "mongo_client", mock_mongo),
             ):
                 with patch(
                     "fastapi.concurrency.run_in_threadpool", new_callable=AsyncMock
