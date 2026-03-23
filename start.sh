@@ -15,12 +15,12 @@ mkdir -p /app/logs
 
 # Start BioBlend server in background with logging to file + terminal
 echo "Starting BioBlend server on port $MCP_PORT..."
-python -m app.bioblend_server --host 0.0.0.0 --port "$MCP_PORT" \
+uv run python -m app.bioblend_server --host 0.0.0.0 --port "$MCP_PORT" \
     2>&1 | tee /app/logs/MCP_server.log &
 
 # Start Uvicorn app in background with logging to file + terminal
 echo "Starting Uvicorn Galaxy Integration service on port $APP_PORT..."
-uvicorn app.main:app --host 0.0.0.0 --port "$APP_PORT" --log-level debug --reload \
+uv run uvicorn app.main:app --host 0.0.0.0 --port "$APP_PORT" --log-level debug --reload \
     2>&1 | tee /app/logs/GX_integration.log &
 
 # Trap SIGTERM and clean up background processes gracefully

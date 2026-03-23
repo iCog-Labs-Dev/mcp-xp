@@ -1,15 +1,21 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# We do NOT copy source code here because we will mount it from host
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --frozen --extra dev --no-install-project
+
 COPY start.sh ./
 RUN chmod +x start.sh
 

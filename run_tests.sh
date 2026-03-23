@@ -12,15 +12,9 @@ UNIT_TEST_DIR="$PROJECT_ROOT/tests"
 echo "Running unit tests in: $UNIT_TEST_DIR"
 echo "============================================================"
 
-# Activate virtual environment if it exists
-if [ -d "$PROJECT_ROOT/venv" ]; then
-    source "$PROJECT_ROOT/venv/Scripts/activate" 2>/dev/null || source "$PROJECT_ROOT/venv/bin/activate"
-    echo "Virtual environment activated."
-fi
-
 echo "Starting unit tests in $UNIT_TEST_DIR...."
 # Run pytest with useful options, tee output for parsing while displaying in logs
-pytest "$UNIT_TEST_DIR" \
+uv run pytest "$UNIT_TEST_DIR" \
   -v \
   -s \
   --disable-warnings \
