@@ -9,7 +9,8 @@ import torch
 from typing import Dict, List
 from abc import ABC, abstractmethod
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from openai import AsyncOpenAI
 from sentence_transformers import SentenceTransformer
 
@@ -36,29 +37,37 @@ class LLMProvider(ABC):
 class GeminiProvider(LLMProvider):
     def __init__(self, model_config):
         super().__init__(model_config)
-        genai.configure(api_key=GEMINI_API_KEY)
-
+        self.client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=10000),
+        )
         self.log = logging.getLogger(self.__class__.__name__)
+
+    @staticmethod
+    def _build_contents(messages: List[Dict[str, str]]) -> List[types.Content]:
+        contents: List[types.Content] = []
+
+        for message in messages:
+            role = message.get("role", "user")
+            sdk_role = "model" if role in {"assistant", "model"} else "user"
+            text = message.get("content", "")
+            contents.append(
+                types.Content(
+                    role=sdk_role,
+                    parts=[types.Part.from_text(text=text)],
+                )
+            )
+
+        return contents
         
     async def get_response(self, messages: List[Dict[str, str]]) -> str:
         """
-        Sends a request to the Gemini API via google.generativeai and returns the generated response.
+        Sends a request to the Gemini API via google-genai and returns the generated response.
         Identical behavior to the HTTP version: builds the same 'contents' structure, applies the same
         generation config, extracts a JSON codeblock if present, and returns parsed JSON when possible.
         """
-        
-        # Convert messages to the format expected by Gemini
-        content_parts = []
-        for message in messages:
-            role = message.get("role", "user")
-            text = message.get("content", "")
-            content_parts.append({
-                "role": role,
-                "parts": [{"text": text}],
-            })
 
-        # Generation config: same fields as before, mapped to SDK names
-        generation_config = genai.GenerationConfig(
+        generation_config = types.GenerateContentConfig(
             temperature=self.config.config_data.get("temperature", 0.7),
             max_output_tokens=self.config.config_data.get("max_tokens", 10000),
             top_p=self.config.config_data.get("top_p", 1),
@@ -68,16 +77,13 @@ class GeminiProvider(LLMProvider):
         model_name = self.config.config_data.get("model")
 
         try:
-            model = genai.GenerativeModel(model_name)
-
-            # Mirror the previous 10s timeout
-            response = await model.generate_content_async(
-                contents=content_parts,
-                generation_config=generation_config,
-                request_options={"timeout": 10.0},
+            response = await self.client.aio.models.generate_content(
+                model=model_name,
+                contents=self._build_contents(messages),
+                config=generation_config,
             )
 
-            content = response.text
+            content = response.text or ""
             json_content = _extract_json_from_llm_response(content)
             try:
                 return json.loads(json_content)
@@ -90,12 +96,12 @@ class GeminiProvider(LLMProvider):
 
     async def embedding_model(self, batch: List[str]) -> List[List[float]]:
         """
-        Generates embeddings for a batch of texts using the google.generativeai SDK.
+        Generates embeddings for a batch of texts using the google-genai SDK.
         Logic preserved:
         - Uses batching (size 100)
         - Retries after an error with a fixed sleep time
         - Returns a flat list of embeddings
-        - Still async by running sync SDK calls in a thread pool
+        - Uses the async SDK client directly
         """
         
 
@@ -103,26 +109,21 @@ class GeminiProvider(LLMProvider):
         batch_size = 100
         sleep_time = 2  # Time to wait before retrying after an error
 
-        # Normalize embedding model name to include 'models/' prefix
         embedding_model = self.config.config_data.get("embedding_model")
         if not embedding_model:
             raise ValueError("Missing 'embedding_model' in config_data")
-        if not embedding_model.startswith("models/"):
-            embedding_model = f"models/{embedding_model}"
+        embedding_model = embedding_model.removeprefix("models/")
 
         for i in range(0, len(batch), batch_size):
             batch_segment = batch[i:i + batch_size]
             
             try:
-                # Run sync call in a thread so we don't block the event loop
-                result = await asyncio.to_thread(
-                    genai.embed_content,
+                result = await self.client.aio.models.embed_content(
                     model=embedding_model,
-                    content=batch_segment,
+                    contents=batch_segment,
                 )
 
-                # Extract embeddings (values) in order
-                batch_embeddings = result["embedding"]
+                batch_embeddings = [embedding.values for embedding in result.embeddings or []]
                 embeddings.extend(batch_embeddings)
 
             except Exception as e:
