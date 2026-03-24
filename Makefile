@@ -26,17 +26,23 @@ ifneq (,$(wildcard .env))
 endif
 
 # Local development commands
+sync:
+	uv sync
+
+sync-dev:
+	uv sync --extra dev
+
 start:
-	uvicorn app.main:app --timeout-keep-alive 1 --host 0.0.0.0 --port $(APP_PORT)
+	uv run uvicorn app.main:app --timeout-keep-alive 1 --host 0.0.0.0 --port $(APP_PORT)
 
 server:
-	python -m app.bioblend_server --port $(MCP_PORT)
+	uv run python -m app.bioblend_server --port $(MCP_PORT)
 
 mcp-server:
-	nohup python -m app.bioblend_server --port $(MCP_PORT) > logs/MCP_server.log 2>&1 &
+	nohup uv run python -m app.bioblend_server --port $(MCP_PORT) > logs/MCP_server.log 2>&1 &
 
 gx-service:
-	nohup uvicorn app.main:app --reload --host 0.0.0.0 --port $(APP_PORT) > logs/GX_integration.log 2>&1 &
+	nohup uv run uvicorn app.main:app --reload --host 0.0.0.0 --port $(APP_PORT) > logs/GX_integration.log 2>&1 &
 
 gx-down:
 	@pid=$$(lsof -ti :$(APP_PORT)); \

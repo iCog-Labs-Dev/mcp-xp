@@ -76,130 +76,174 @@ class TestGeminiProvider:
     @pytest.mark.asyncio
     async def test_gemini_provider_initialization(self, gemini_config):
         """Test GeminiProvider initialization."""
-        with patch("app.llm_provider.genai.configure") as mock_configure:
+        with patch("app.llm_provider.genai.Client") as mock_client:
             provider = GeminiProvider(gemini_config)
             
             assert provider.config == gemini_config
-            mock_configure.assert_called_once()
+            mock_client.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_gemini_get_response_success_with_json(self, gemini_config, sample_messages):
         """Test successful response from Gemini API with JSON content."""
-        with patch("app.llm_provider.genai.configure"):
-            provider = GeminiProvider(gemini_config)
-            
-            # Mock the GenerativeModel and its response
-            mock_model = MagicMock()
+        with patch("app.llm_provider.genai.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+
             mock_response = MagicMock()
             mock_response.text = '```json\n{"answer": "Paris"}\n```'
-            mock_model.generate_content_async = AsyncMock(return_value=mock_response)
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            provider = GeminiProvider(gemini_config)
+            result = await provider.get_response(sample_messages)
             
-            with patch("app.llm_provider.genai.GenerativeModel", return_value=mock_model):
-                result = await provider.get_response(sample_messages)
-                
-                assert isinstance(result, dict)
-                assert result == {"answer": "Paris"}
-                mock_model.generate_content_async.assert_called_once()
+            assert isinstance(result, dict)
+            assert result == {"answer": "Paris"}
+            mock_client.aio.models.generate_content.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_gemini_get_response_success_plain_text(self, gemini_config, sample_messages):
         """Test successful response from Gemini API with plain text."""
-        with patch("app.llm_provider.genai.configure"):
-            provider = GeminiProvider(gemini_config)
-            
-            mock_model = MagicMock()
+        with patch("app.llm_provider.genai.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+
             mock_response = MagicMock()
             mock_response.text = "The capital of France is Paris."
-            mock_model.generate_content_async = AsyncMock(return_value=mock_response)
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            provider = GeminiProvider(gemini_config)
+            result = await provider.get_response(sample_messages)
             
-            with patch("app.llm_provider.genai.GenerativeModel", return_value=mock_model):
-                result = await provider.get_response(sample_messages)
-                
-                assert isinstance(result, str)
-                assert result == "The capital of France is Paris."
+            assert isinstance(result, str)
+            assert result == "The capital of France is Paris."
+
+    @pytest.mark.asyncio
+    async def test_gemini_get_response_maps_assistant_role_to_model(self, gemini_config, sample_messages):
+        """Test Gemini message conversion uses model role for assistant messages."""
+        with patch("app.llm_provider.genai.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+
+            mock_response = MagicMock()
+            mock_response.text = "ok"
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+
+            provider = GeminiProvider(gemini_config)
+            await provider.get_response(sample_messages)
+
+            call_kwargs = mock_client.aio.models.generate_content.await_args.kwargs
+            contents = call_kwargs["contents"]
+
+            assert contents[0].role == "user"
+            assert contents[1].role == "model"
 
     @pytest.mark.asyncio
     async def test_gemini_get_response_api_error(self, gemini_config, sample_messages):
         """Test Gemini API error handling."""
-        with patch("app.llm_provider.genai.configure"):
-            provider = GeminiProvider(gemini_config)
-            
-            mock_model = MagicMock()
-            mock_model.generate_content_async = AsyncMock(
+        with patch("app.llm_provider.genai.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            mock_client.aio.models.generate_content = AsyncMock(
                 side_effect=Exception("API rate limit exceeded")
             )
-            
-            with patch("app.llm_provider.genai.GenerativeModel", return_value=mock_model):
-                with pytest.raises(RuntimeError, match="Gemini API error"):
-                    await provider.get_response(sample_messages)
+
+            provider = GeminiProvider(gemini_config)
+
+            with pytest.raises(RuntimeError, match="Gemini API error"):
+                await provider.get_response(sample_messages)
 
     @pytest.mark.asyncio
     async def test_gemini_embedding_model_success(self, gemini_config):
         """Test successful embedding generation with Gemini."""
-        with patch("app.llm_provider.genai.configure"):
-            provider = GeminiProvider(gemini_config)
-            
+        with patch("app.llm_provider.genai.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+
             batch = ["text1", "text2", "text3"]
             mock_embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
+            mock_client.aio.models.embed_content = AsyncMock(
+                return_value=MagicMock(
+                    embeddings=[MagicMock(values=embedding) for embedding in mock_embeddings]
+                )
+            )
+
+            provider = GeminiProvider(gemini_config)
+            result = await provider.embedding_model(batch)
             
-            def mock_embed_content(model, content):
-                return {"embedding": mock_embeddings[:len(content)]}
-            
-            with patch("app.llm_provider.genai.embed_content", side_effect=mock_embed_content):
-                with patch("asyncio.to_thread", side_effect=lambda f, **kwargs: f(**kwargs)):
-                    result = await provider.embedding_model(batch)
-                    
-                    assert len(result) == 3
-                    assert result == mock_embeddings
+            assert len(result) == 3
+            assert result == mock_embeddings
 
     @pytest.mark.asyncio
     async def test_gemini_embedding_model_with_batching(self, gemini_config):
         """Test embedding generation with large batch requiring batching."""
-        with patch("app.llm_provider.genai.configure"):
-            provider = GeminiProvider(gemini_config)
-            
+        with patch("app.llm_provider.genai.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+
             # Create a batch larger than batch_size (100)
             batch = [f"text{i}" for i in range(150)]
-            
+
             call_count = 0
-            def mock_embed_content(model, content):
+
+            async def mock_embed_content(**kwargs):
                 nonlocal call_count
                 call_count += 1
-                return {"embedding": [[0.1, 0.2] for _ in content]}
+                contents = kwargs.get("contents", [])
+                return MagicMock(
+                    embeddings=[MagicMock(values=[0.1, 0.2]) for _ in contents]
+                )
+
+            mock_client.aio.models.embed_content = mock_embed_content
+
+            provider = GeminiProvider(gemini_config)
+            result = await provider.embedding_model(batch)
             
-            with patch("app.llm_provider.genai.embed_content", side_effect=mock_embed_content):
-                with patch("asyncio.to_thread", side_effect=lambda f, **kwargs: f(**kwargs)):
-                    result = await provider.embedding_model(batch)
-                    
-                    assert len(result) == 150
-                    # Should be called twice: once for first 100, once for remaining 50
-                    assert call_count == 2
+            assert len(result) == 150
+            assert call_count == 2
 
     @pytest.mark.asyncio
     async def test_gemini_embedding_model_error_handling(self, gemini_config):
         """Test embedding generation with error handling."""
-        with patch("app.llm_provider.genai.configure"):
-            provider = GeminiProvider(gemini_config)
-            
+        with patch("app.llm_provider.genai.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
             batch = ["text1", "text2"]
-            
-            def mock_embed_content(model, content):
-                raise Exception("Temporary error")
-            
-            with patch("app.llm_provider.genai.embed_content", side_effect=mock_embed_content):
-                with patch("asyncio.to_thread", side_effect=lambda f, **kwargs: f(**kwargs)):
-                    with patch("asyncio.sleep", new_callable=AsyncMock):
-                        result = await provider.embedding_model(batch)
-                        
-                        # When error occurs, it logs and continues, returning empty list
-                        assert len(result) == 0
+
+            mock_client.aio.models.embed_content = AsyncMock(
+                side_effect=Exception("Temporary error")
+            )
+
+            provider = GeminiProvider(gemini_config)
+
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                result = await provider.embedding_model(batch)
+                
+                assert len(result) == 0
+
+    @pytest.mark.asyncio
+    async def test_gemini_embedding_model_strips_legacy_models_prefix(self, gemini_config):
+        """Test Gemini embedding model names are normalized for google-genai."""
+        gemini_config.config_data["embedding_model"] = "models/gemini-embedding-001"
+
+        with patch("app.llm_provider.genai.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            mock_client.aio.models.embed_content = AsyncMock(
+                return_value=MagicMock(embeddings=[MagicMock(values=[0.1, 0.2])])
+            )
+
+            provider = GeminiProvider(gemini_config)
+            await provider.embedding_model(["text1"])
+
+            call_kwargs = mock_client.aio.models.embed_content.await_args.kwargs
+            assert call_kwargs["model"] == "gemini-embedding-001"
 
     @pytest.mark.asyncio
     async def test_gemini_embedding_model_missing_config(self, gemini_config):
         """Test embedding generation with missing embedding_model config."""
         gemini_config.config_data.pop("embedding_model")
         
-        with patch("app.llm_provider.genai.configure"):
+        with patch("app.llm_provider.genai.Client"):
             provider = GeminiProvider(gemini_config)
             
             batch = ["text1"]

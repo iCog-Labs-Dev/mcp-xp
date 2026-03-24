@@ -1,14 +1,63 @@
+[build-system]
+requires = ["setuptools>=80.9.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "mcptrial"
+name = "mcp-xp-docker-integration"
 version = "0.1.0"
-description = "Add your description here"
+description = "Galaxy integration service with FastAPI and FastMCP servers"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
-    "mcp[cli]>=1.4.1",
-    "requests>=2.32.3",
-    "beeai-framework==0.1.4",
+    "aiofiles==25.1.0",
+    "anyio==4.9.0",
+    "bioblend==1.5.0",
+    "cryptography==45.0.5",
+    "fastapi==0.115.12",
+    "fastmcp==2.13.1",
+    "google-genai==1.68.0",
+    "httpx==0.28.1",
+    "numpy==2.2.6",
+    "openai==1.75.0",
+    "pandas==2.3.0",
+    "pydantic==2.11.7",
+    "PyJWT==2.10.1",
+    "pymongo==4.15.5",
+    "python-dotenv==1.1.0",
+    "python-multipart==0.0.20",
+    "PyYAML==6.0.2",
+    "qdrant-client==1.14.3",
+    "RapidFuzz==3.13.0",
+    "redis==6.2.0",
+    "requests==2.32.3",
+    "sentence-transformers==5.1.2",
+    "tenacity==9.1.2",
+    "tiktoken==0.12.0",
+    "torch==2.9.1",
+    "uvicorn==0.38.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "coverage==7.12.0",
+    "flake8>=7.1,<8",
+    "pytest==8.4.2",
+    "pytest-asyncio==1.2.0",
+    "pytest-cov==4.1.0",
+    "pytest-timeout==2.4.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["*.yaml"]
+"app.bioblend_server.informer" = ["*.md"]
+"app.mcp_client" = ["*.json"]
