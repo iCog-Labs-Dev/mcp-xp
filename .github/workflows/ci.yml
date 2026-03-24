@@ -42,9 +42,15 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          uv run flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --verbose
-          uv run flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics --verbose --format='%(path)s:%(row)d:%(col)d: %(code)s %(text)s'
+          uv run flake8 . \
+            --exclude=.venv,__pycache__,.git,.mypy_cache,.pytest_cache,build,dist \
+            --count --select=E9,F63,F7,F82 --show-source --statistics
 
+          uv run flake8 . \
+            --exclude=.venv,__pycache__,.git,.mypy_cache,.pytest_cache,build,dist \
+            --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics \
+            --format='%(path)s:%(row)d:%(col)d: %(code)s %(text)s'
+            
       - name: Run tests with coverage
         env:
           SECRET_KEY: this-is-a-dummy-key-for-ci-only-1234567890==
