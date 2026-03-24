@@ -56,6 +56,8 @@ jobs:
           SECRET_KEY: this-is-a-dummy-key-for-ci-only-1234567890==
           GALAXY_URL: http://test-galaxy
           GALAXY_API_KEY: test-galaxy-key
+          GALAXY_SCRAPING_URL: http://test-galaxy
+          GALAXY_SCRAPING_API_KEY: test-galaxy-scraping-key
           APP_PORT: "8895"
           MCP_PORT: "8897"
           REDIS_PORT: "6389"
