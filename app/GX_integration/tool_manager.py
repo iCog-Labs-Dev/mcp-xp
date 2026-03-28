@@ -320,8 +320,8 @@ class ToolManager:
             job_id: str,
             ws_manager: SocketManager,
             tracker_id: str,
-            initial_wait: int = 1800,
-            base_extension: int = 300
+            initial_wait: int,
+            base_extension: int
             )-> Job:
         """Waits for a Galaxy job to finish, with dynamic timeout and progress tracking."""
 
@@ -502,7 +502,13 @@ class ToolManager:
             )
 
         # Track job until it complete before making result
-        job= await self.wait(job_id, ws_manager=ws_manager, tracker_id=tracker_id) 
+        job= await self.wait(
+            job_id = job_id,
+            ws_manager = ws_manager,
+            tracker_id = tracker_id,
+            initial_wait = NumericLimits.TOOL_EXECUTION_INITIAL_WAIT.value,
+            base_extension = NumericLimits.TOOL_EXECUTION_EXTENSION.value
+            )
 
         output_datasets: List[dict] = []
 
