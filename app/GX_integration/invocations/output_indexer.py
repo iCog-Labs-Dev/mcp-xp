@@ -5,7 +5,8 @@ from app.galaxy import GalaxyClient
 from app.api.socket_manager import SocketManager
 from app.GX_integration.tool_manager import ToolManager
 from app.orchestration.invocation_cache import InvocationCache
-
+from app.persistence import MongoStore
+from app.enumerations import CollectionNames
 from app.GX_integration.invocations.utils import (
     FASTAIndexerTools,
     VCFIndexerTools,
@@ -13,16 +14,22 @@ from app.GX_integration.invocations.utils import (
     GTFIndexerTools
 )
 
+from app.api.schemas import dataset
+from app.enumerations import IndexingResponses, NumericLimits, SocketMessageEvent, SocketMessageType
+from app.GX_integration.invocations.utils import log_task_error
+from app.exceptions import InternalServerErrorException
+
 class OutputIndexer:
     """support dataset indexing for galaxy workflow invocation output datasets for visualization purposes."""
     
-    def __init__(self, username: str, galaxy_client: GalaxyClient, cache: InvocationCache, ws_manager: SocketManager):
+    def __init__(self, username: str, galaxy_client: GalaxyClient, cache: InvocationCache, mongo_client: MongoStore, ws_manager: SocketManager):
 
         self.gi = galaxy_client.gi_client
         self.username = username
         self.cache = cache
         self.ws_manager = ws_manager
         self.tool_manager = ToolManager(galaxy_client = galaxy_client)
+        self.mongo_client = mongo_client
         
         self.log = logging.getLogger(__class__.__name__)
         
@@ -65,7 +72,7 @@ class OutputIndexer:
                 }
             )
             
-        self.log.info(f"Index structuring complete for {dataset_name} ({len(structured_index)} files).")
+        self.log.debug(f"Index structuring complete for {dataset_name} ({len(structured_index)} files).")
         return structured_index
        
        
@@ -93,7 +100,7 @@ class OutputIndexer:
         self.log.debug(f"FASTA indexing tool completed: produced={len(result['dataset'])} output(s)")
         
         self.index_count += 1
-        self.log.info(f"fasta indexing complete for dataset id: {dataset_id} - {self.index_count}/{self.total_index}")
+        self.log.debug(f"fasta indexing complete for dataset id: {dataset_id} - {self.index_count}/{self.total_index}")
         
         return await self._structure_indexed_data(
             history_id = history_id,
@@ -144,7 +151,7 @@ class OutputIndexer:
             return []
         
         self.index_count += 1
-        self.log.info(f"vcf indexing complete for dataset id: {dataset_id} - {self.index_count}/{self.total_index}")
+        self.log.debug(f"vcf indexing complete for dataset id: {dataset_id} - {self.index_count}/{self.total_index}")
         return await self._structure_indexed_data(
             history_id = history_id,
             dataset_name = f"{name}_tabix_index", 
@@ -174,7 +181,7 @@ class OutputIndexer:
             return []       
          
         self.index_count += 1
-        self.log.info(f"bam indexing complete for dataset id: {dataset_id} - {self.index_count}/{self.total_index}")
+        self.log.debug(f"bam indexing complete for dataset id: {dataset_id} - {self.index_count}/{self.total_index}")
         return await self._structure_indexed_data(
             history_id = history_id,
             dataset_name = f"{name}_bai_index", 
@@ -227,7 +234,7 @@ class OutputIndexer:
             return []
         
         self.index_count += 1
-        self.log.info(f"GTF indexing complete for dataset id: {dataset_id} - {self.index_count}/{self.total_index}")
+        self.log.debug(f"GTF indexing complete for dataset id: {dataset_id} - {self.index_count}/{self.total_index}")
         return await self._structure_indexed_data(
             history_id = history_id,
             dataset_name = f"{name}_tabix_index", 
@@ -236,7 +243,11 @@ class OutputIndexer:
     
     #TODO: Add more dataset indexing functions that JBrowse supports.
     
-    async def index_datasets(self, invocation_result: dict):
+    async def index_datasets_and_register(self, invocation_result: dict):
+        """
+        This function cleans indexes outputs of an invocaiton if they are a [fasta, vcf, bam, gtf] file,
+        and then registers them to the output list
+        """
         
         # create dict to collect datasets to be indexed. NOTE: Add as needed, for now we support fasta, vcf and bam files. 
         index_datasets = {
@@ -288,8 +299,22 @@ class OutputIndexer:
             if self.total_index > 0:
                 
                 self.log.info(f"Total datasets to index: {self.total_index}")
-                self.log.info(f"Beginning dataset indexing for invocation_id={invocation_id} in history_id={history_id}")
+                self.log.debug(f"Beginning dataset indexing for invocation_id = {invocation_id} in history_id = {history_id}")
                 
+                completed = 0
+
+                # Notify start
+                if self.ws_manager:
+                    
+                    await self.ws_manager.broadcast(
+                        event=SocketMessageEvent.output_index.value,
+                        data={
+                            "type": SocketMessageType.INDEX_START.value,
+                            "payload":{ "message" : f"Starting indexing of {self.total_index} datasets for invocation {invocation_id}"},
+                        },
+                        tracker_id=invocation_id
+                    )
+                    
                 # gather index results; Run tasks concurrently, process results as they finish
                 for coro in asyncio.as_completed(indexing_task):
 
@@ -308,8 +333,254 @@ class OutputIndexer:
                             invocation_id=invocation_id,
                             result=invocation_result
                         )
-
+                        
+                        if self.ws_manager:
+                            
+                            completed += 1
+                            await self.ws_manager.broadcast(
+                                event=SocketMessageEvent.output_index.value,
+                                data={
+                                    "type": SocketMessageType.INDEX_UPDATE.value,
+                                    "payload":{
+                                        "message": f"Dataset indexing progress: {completed}/{self.total_index}",
+                                        "progress": f"{completed}/{self.total_index}"
+                                        }
+                                },
+                                tracker_id=invocation_id
+                            )
                         self.log.debug("Incremental index result saved to cache.")
 
                     except Exception as e:
                         self.log.error(f"Indexing subtask failed: {e}")
+                
+                self.log.debug(F'Invocaion with id {invocation_id} as completed execution and indexing, persisting final results.')
+                
+                if self.ws_manager:
+                    
+                    await self.ws_manager.broadcast(
+                        event=SocketMessageEvent.output_index.value,
+                        data={
+                            "type": SocketMessageType.INDEX_FINISH.value,
+                            "payload": {
+                                "message": f"Completed indexing datasets for invocation {invocation_id}."
+                                },
+                        },
+                        tracker_id=invocation_id
+                    )
+                    
+                await self.mongo_client.set(
+                    collection_name= CollectionNames.INVOCATION_RESULTS.value, 
+                    key = f"{self.username}:{invocation_id}", 
+                    value = invocation_result
+                )
+                
+                extracted_outputs = []
+                
+                for output in invocation_outputs:
+                    dataset_type = output.get("type")
+                    if  dataset_type == "dataset":
+                        extracted_outputs.append({
+                            "id": output.get("id"),
+                            "name": output.get("name"),
+                            "type": output.get("data_type")
+                        })
+                        
+                    elif dataset_type == "collection":
+                        collection_elements: list[dict] = output.get("elements", [])
+                        for element in collection_elements:
+                            extracted_outputs.append({
+                                "id":element.get("id"),
+                                "name":  element.get("name"),
+                                "type": element.get("data_type", "unknown")
+                            })
+                        
+                self.log.debug("output information extracted and stored.")
+
+                await self.mongo_client.update_value_element(
+                    collection_name = CollectionNames.INVOCATION_LISTS.value,
+                    key = self.username,
+                    match_field = "id",
+                    match_value = invocation_id,
+                    update_field = "outputs",
+                    new_value = extracted_outputs
+                )
+                
+                self.log.info(f"Worklfow invocaiton with id {invocation_id} has completed full execution including output indexing. results have been stored.")           
+
+    async def index_single_dataset(self, dataset_id: str):
+            """
+            Index a single Galaxy dataset and return the indexed output.
+            """
+            try:
+                # Fetch metadata
+                dataset = await asyncio.to_thread(self.gi.datasets.show_dataset, dataset_id=dataset_id)
+            except Exception as e:
+                self.log.error(f"Failed to fetch dataset metadata: {e}")
+                return None
+
+            dataset_name = dataset.get("name")
+            data_type = dataset.get("data_type", "unknown")
+            history_id = dataset.get("history_id")
+
+            if not history_id or not dataset_name:
+                self.log.error(f"Invalid dataset metadata for dataset_id={dataset_id}")
+                return None
+
+            dataset_tuple = (dataset_name, dataset_id)
+            result = []
+            
+            # Use elif to ensure mutual exclusivity
+            if data_type == "fasta":
+                result = await self.index_fasta(history_id, dataset_tuple)
+            elif data_type == "vcf":
+                result = await self.index_vcf(history_id, dataset_tuple)
+            elif data_type == "bam":
+                result = await self.index_bam(history_id, dataset_tuple)
+            elif data_type == "gtf":
+                result = await self.index_gtf(history_id, dataset_tuple)
+            else:
+                self.log.warning(
+                    f"No indexer available for dataset_id={dataset_id}, type={data_type}"
+                )
+                return None # Explicit None for unsupported types
+
+            # Result is likely a list of dicts based on your other methods
+            if result and len(result) > 0:
+                return result[0]
+            
+            return None
+        
+    async def _run_dataset_index_background(
+        self,
+        dataset_id: str,
+        username: str,
+        unique_id: str
+    ):
+        """Background worker – moved here so the service owns the whole flow"""
+        self.log.info(f"Background indexing started for dataset {dataset_id}")
+        try:
+            indexed_result = await self.index_single_dataset(dataset_id)
+
+            if indexed_result:
+                
+                response = {
+                        "status": IndexingResponses.COMPLETE_STATUS.value,
+                        "message": IndexingResponses.COMPLETE_STATUS.value,
+                        "dataset": {
+                            "id": indexed_result["id"],
+                            "name": indexed_result["name"],
+                            "type": indexed_result["data_type"],
+                        }
+                    }
+                # Persist with the same pattern as invocation results (per-item key)
+                await self.mongo_client.set_element(
+                    collection_name=CollectionNames.DATA_INDEXES.value,
+                    key=username,
+                    field=unique_id,
+                    value=response
+                )
+
+                # Cache it
+                await self.cache.set_dataset_index(username = username, unique_id = unique_id, index_data = response)
+
+                # Notify user
+                if self.ws_manager:
+                    
+                    await self.ws_manager.broadcast(
+                        event= SocketMessageEvent.output_index.value,
+                        data={
+                            "type": SocketMessageType.INDEX_FINISH.value,
+                            "payload": {"message": "Dataset indexing complete"}
+                        },
+                        tracker_id = unique_id
+                    )
+                self.log.info(f"Indexing complete and persisted for {dataset_id}")
+                
+            else:
+                raise RuntimeError("Indexing produced no result")
+
+        except Exception as e:
+            self.log.error(f"Background indexing failed: {e}")
+            await self.cache.delete_dataset_index(username, unique_id)
+            
+            if self.ws_manager:
+                
+                await self.ws_manager.broadcast(
+                    event=SocketMessageEvent.output_index.value,
+                    data={
+                        "type": SocketMessageType.INDEX_FAIL.value, 
+                        "payload": {"message": "Dataset indexing Failed."}
+                        },
+                    tracker_id=unique_id
+                )
+                
+    async def get_dataset_index(
+        self,
+        dataset_id: str,
+        unique_id: str,
+        username: str,
+    ) -> dataset.IndexingResponse:
+        """Exactly the same pattern as get_invocation_result: check cache → mongo → start background if missing"""
+        try:
+            # 1. Cache hit?
+            cached_index = await self.cache.get_dataset_index(username, unique_id)
+            if cached_index:
+                self.log.info("Dataset index served from cache")
+                return dataset.IndexingResponse(**cached_index)
+
+            # 2. Mongo hit?
+            stored_index = await self.mongo_client.get_element(
+                collection_name=CollectionNames.DATA_INDEXES.value,
+                key= username,
+                field = unique_id
+            )
+            if stored_index:
+                await self.cache.set_dataset_index(username, unique_id, stored_index)
+                self.log.info("Dataset index served from database")
+                return dataset.IndexingResponse(**stored_index)
+            
+            if self.ws_manager:
+                
+                await self.ws_manager.broadcast(
+                    event = SocketMessageEvent.output_index.value,
+                    data = {
+                        "event": SocketMessageType.INDEX_START.value, # TODO
+                        "payload": {"message" :"Starting Dataset indexing."}
+                    },
+                    tracker_id = unique_id
+                )
+
+            # Optional short-lived "processing" marker
+            result = {
+                "status" : IndexingResponses.PENDING_STATUS.value,
+                "message" : IndexingResponses.PENDING_MESSAGE.value,
+                "dataset" : None
+            }
+            await self.cache.set_dataset_index(
+                username = username, unique_id = unique_id, index_data = result
+            )
+
+            tracking_key = f"{username}_{dataset_id}_{unique_id}"
+            overflowcheck = await asyncio.to_thread(
+                    self.cache.redis.set, tracking_key, "1", ex=NumericLimits.BACKGROUND_INDEX_TRACK.value, nx=True
+                )
+            if overflowcheck:
+                background_task = asyncio.create_task(
+                    self._run_dataset_index_background(
+                        dataset_id=dataset_id,
+                        username=username,
+                        unique_id=unique_id
+                    )
+                )
+                
+                background_task.add_done_callback(lambda t: log_task_error(t, task_name="dataset_indexing"))
+                self.log.info(f"Background indexing started for dataset {dataset_id}")
+                
+            else:
+                self.log.info(f"Indexing already in progress for dataset {dataset_id}, skipping background task")
+            
+            return dataset.IndexingResponse(**result)
+
+        except Exception as e:
+            self.log.error(f"Error in get_dataset_index: {e}")
+            raise InternalServerErrorException("Failed to process dataset index")

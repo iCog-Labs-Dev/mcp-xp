@@ -15,12 +15,15 @@ services:
       - QDRANT_HOST=qdrant
       - QDRANT_HTTP_PORT=${QDRANT_HTTP_PORT}
       - CURRENT_LLM=${CURRENT_LLM:-openai} # Set current LLM to run the MCP server with, defaults to openai.
+      - MONGO_HOST=mongo
+      - MONGO_PORT=${MONGO_PORT}
     ports:
       - "${APP_PORT}:8895" # Uvicorn
       - "${MCP_PORT}:8897" # bioblend_server
     depends_on:
       - redis
       - qdrant
+      - mongo
     volumes:
       - ./logs:/app/logs
       - ./app:/app/app            # Live code sync
@@ -51,6 +54,18 @@ services:
       - vectordata:/qdrant/storage
     restart: unless-stopped
 
+  mongo:
+    image: mongo:latest
+    platform: linux/amd64
+    container_name: mongo
+    command: ["mongod", "--bind_ip_all", "--port", "${MONGO_PORT}"]
+    ports:
+      - "${MONGO_PORT}:${MONGO_PORT}"
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
 volumes:
   vectordata:
   redis_data:
+  mongo_data:

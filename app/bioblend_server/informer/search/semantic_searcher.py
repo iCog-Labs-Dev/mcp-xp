@@ -161,7 +161,7 @@ class SemanticSearcher:
                 workflow_name = user_item.get("name", "").strip()
                 key = self._normalize_workflow_name(workflow_name)
             else:
-                key = item.get("name", "").strip()
+                key = user_item.get("name", "").strip()
 
             if not key:
                 merged_list.append(user_item)

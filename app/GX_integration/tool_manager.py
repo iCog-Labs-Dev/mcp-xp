@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
 import time
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 import os
 from dotenv import load_dotenv
 from rapidfuzz import process, fuzz
@@ -16,13 +16,16 @@ path.append('.')
 
 from starlette.datastructures import FormData
 from app.galaxy import GalaxyClient
-from bioblend.galaxy.objects.wrappers import Job, History, Tool, Dataset
+from bioblend.galaxy.objects.wrappers import Job, History, Tool
 
 from app.GX_integration.form_generator import ToolFormGenerator
 from app.GX_integration.data_manager import DataManager
 from app.api.socket_manager import SocketManager
-from app.api.socket_enums import SocketMessageEvent, SocketMessageType
-from app.enumerations import NumericLimits
+from app.enumerations import (
+    SocketMessageEvent,
+    SocketMessageType,
+    NumericLimits
+    )
 
 class ToolManager:
     """
@@ -335,7 +338,7 @@ class ToolManager:
             current_state = job.state
 
             if current_state != previous_state:
-                self.log.info(f"Job {job_id} transitioned to {current_state}")
+                self.log.debug(f"Job {job_id} transitioned to {current_state}")
                 
                 if ws_manager:
                     await ws_manager.broadcast(
@@ -355,13 +358,13 @@ class ToolManager:
                 deadline = max(deadline + extension, start_time + initial_wait)
 
             if current_state == "ok":
-                self.log.info("Job execution complete.")
+                self.log.debug("Job execution complete.")
                 if ws_manager:
                     await ws_manager.broadcast(
                         event = SocketMessageEvent.tool_execute.value,
                         data = {
                             "type": SocketMessageType.JOB_COMPLETE.value,
-                            "data" : {"message": "Job execution complete." }
+                            "payload" : {"message": "Job execution complete." }
                         },
                         tracker_id=tracker_id
                         )
@@ -375,7 +378,7 @@ class ToolManager:
                         event = SocketMessageEvent.tool_execute.value,
                         data = {
                             "type": SocketMessageType.JOB_FAILURE.value,
-                            "data" : {"message": "Job execution cancelled or failed." }
+                            "payload" : {"message": "Job execution cancelled or failed." }
                         },
                         tracker_id=tracker_id
                         )
@@ -396,7 +399,7 @@ class ToolManager:
                             event = SocketMessageEvent.tool_execute.value,
                             data = {
                             "type": SocketMessageType.JOB_FAILURE.value,
-                            "data" : {"message": "Job cancelled due to timeout." }
+                            "payload" : {"message": "Job cancelled due to timeout." }
                             },
                             tracker_id=tracker_id
                         )
@@ -409,7 +412,7 @@ class ToolManager:
                             event = SocketMessageEvent.tool_execute.value,
                             data = {
                             "type": SocketMessageType.JOB_FAILURE.value,
-                            "data" : {"message": f"Job execution failed: {e}"}
+                            "payload" : {"message": f"Job execution failed: {e}"}
                             },
                             tracker_id=tracker_id
                         )
@@ -486,7 +489,7 @@ class ToolManager:
         job_id = tool_execution['jobs'][0]['id']
         outputs = tool_execution['outputs']
 
-        self.log.info(f"Started job {job_id} for tool {tool_id!r}")
+        self.log.debug(f"Started job {job_id} for tool {tool_id!r}")
         
         if ws_manager:
             await ws_manager.broadcast(

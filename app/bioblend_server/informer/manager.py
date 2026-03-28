@@ -142,6 +142,10 @@ class InformerManager:
         """
         try:
             df = self._prepare_dataframe(entities)
+            
+            if df.empty or 'content' not in df.columns:
+                raise ValueError("No data available for embedding")
+            
             df_embedded = await self._generate_embeddings(df)
             if df_embedded is not None:
                 if self.client.collection_exists(collection_name):
@@ -238,7 +242,7 @@ class InformerManager:
                     must=[
                         FieldCondition(
                             key="name",
-                            match=MatchText(value=workflow_name)
+                            match=MatchText(text=workflow_name)
                         )
                     ]
                 ),

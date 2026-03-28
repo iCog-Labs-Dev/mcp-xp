@@ -2,113 +2,59 @@ import os
 import json
 import logging
 import asyncio
-import jwt
+import httpx
+import redis
 
-from typing import Optional
-from contextvars import ContextVar
-from cryptography.fernet import Fernet, InvalidToken
+from typing import Optional, Literal, Any
+from pydantic import BaseModel 
 
-from fastmcp.server.middleware import Middleware, MiddlewareContext, CallNext
-from fastmcp.server.dependencies import get_http_headers
-
+from app.log_setup import configure_logging
 from app.llm_config import LLMModelConfig, LLMConfiguration
 from app.llm_provider import GeminiProvider, OpenAIProvider
 
-current_api_key_server: ContextVar[str] = ContextVar("current_api_key_server", default=None)
+from app.enumerations import InvocationStates
 
-GALAXY_API_TOKEN = "galaxy_api_token"
+from app.galaxy import GalaxyClient
+from app.bioblend_server.mcp_context import current_api_key_server
+from app.orchestration.invocation_cache import InvocationCache
+from app.orchestration.invocation_tasks import InvocationBackgroundTasks
 
-class JWTGalaxyKeyMiddleware(Middleware):
-    """
-    FastMCP middleware that expects:
-      Authorization: Bearer <JWT>
-    The JWT must contain a claim ('galaxy_api_token') that is either:
-      - a fernet-encrypted JSON payload like {"apikey": "<actual_key>"} (what the register user produces)
-    The middleware will set current_api_key to the final plain api key string.
-    """
-    def __init__(self):
-        self.log = logging.getLogger(self.__class__.__name__)
+from app.persistence import MongoStore
+from app.GX_integration.invocations.invocation_service import InvocationService
+from app.GX_integration.workflows.workflow_manager import WorkflowManager
+from app.GX_integration.invocations.data_manager import InvocationDataManager
 
-    async def on_request(self, context: MiddlewareContext, call_next: CallNext):
-        
-        # Get header and validate tokem.        
-        headers = get_http_headers(include_all=True)
-        auth = headers.get("Authorization", None) or headers.get("authorization", None)
-        
-        if auth is None:
-            self.log.error("unauthorized, Authorization header with Bearer token is required.")
-            return {"error": "Unauthorized"}
-        
-        if not auth.startswith("Bearer "):
-            self.log.error("unauthorized, Authorization header with Bearer token is required.")
-            return {"error": "Unauthorized"}
+configure_logging()
+logger = logging.getLogger("fastmcp_bioblend_server")
 
-        token = auth.split(" ")[1].strip()
-        try:
-            payload = self._decode_jwt(token)
-        except Exception as e:
-            self.log.error(f"unauthorized, Invalid JWT: {e}")
-            return {"error": "Unauthorized"}
+mongo_client = MongoStore()
+redis_client = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=os.getenv("REDIS_PORT"), db=0, decode_responses=True)
+invocation_cache = InvocationCache(redis_client)
+invocation_background = InvocationBackgroundTasks(cache = invocation_cache, redis_client = redis_client)
+invocation_service = InvocationService(cache = invocation_cache, background_tasks= invocation_background, mongo_client= mongo_client)
+inv_data_manager = InvocationDataManager(cache = invocation_cache, background_tasks = invocation_background)
 
-        # Extract the API token claim
-        if GALAXY_API_TOKEN not in payload:
-            self.log.error("JWT missing API key claim '%s'", GALAXY_API_TOKEN)
-            return {"error": "Unauthorized"}
 
-        galaxy_jwt_token = payload[GALAXY_API_TOKEN]
-        if not galaxy_jwt_token:
-            self.log.error("Empty API key claim")
-            return {"error": "Unauthorized"}
 
-        # Try to decrypt claim_value (The fernet token string produced by register-user)
-        apikey = await self._decrypt_api_token(galaxy_jwt_token)
-
-        # Set the context for downstream tools/handlers
-        current_api_key_server.set(apikey)
-        self.log.info("Incoming request to MCP server validated.")
-        
-        return await call_next(context)
-
-    def _decode_jwt(self, token: str) -> dict:
-        """
-        Decode/verify JWT synchronously (PyJWT). Raises Exception on invalid token.
-        For RS-based tokens, JWT_SECRET should contain the public key (but here signature verification is disabled).
-        """
-        try:
-            payload = jwt.decode(token, options={"verify_signature": False})
-            return payload
-        except jwt.InvalidTokenError as e:
-            self.log.error("Invalid JWT: %s", e)
-            raise ValueError(f"Invalid JWT: {e}")
-
-    async def _decrypt_api_token(self, token_str: str) -> Optional[str]:
-        """
-        If token_str is a fernet-encrypted payload (bytes when encoded),
-        decrypt and parse JSON for {"apikey": "<value>"} and return the value.
-        Returns None if decryption/parsing fails so caller can fallback to raw token.
-        """
-        if not isinstance(token_str, str) or not token_str:
-            return None
-        loop = asyncio.get_running_loop()
-        try:
-            # Environment / secrets
-            FERNET_SECRET = os.getenv("SECRET_KEY")
-            if not FERNET_SECRET:
-                raise RuntimeError("SECRET_KEY (Fernet secret) is required in env")
-            fernet = Fernet(FERNET_SECRET)
-            
-            decrypted = await loop.run_in_executor(None, fernet.decrypt, token_str.encode("utf-8"))
-            parsed: dict = await loop.run_in_executor(None, json.loads, decrypted.decode("utf-8"))
-            apikey = parsed.get("apikey")
-            if apikey and isinstance(apikey, str):
-                return apikey
-            self.log.error("Decrypted JWT galaxy api-key payload missing 'apikey' field")
-            return None
-        except (InvalidToken, Exception) as e:
-            # Not a fernet payload or parse failed; return None so fallback can apply
-            self.log.debug("Fernet decryption/parsing failed for JWT claim: %s", e)
-            return None
-        
+# Pydantic model for the MCP server responses
+class MCPActions(BaseModel):
+    """Action Lookup for the MCP server."""
+    
+    action: Literal["Execute", "Import"]
+    link: Optional[str] = None
+    
+class InformerResponse(BaseModel):
+    """The Galaxy Informer tool response schema."""
+    
+    response: str
+    actions: dict[str,MCPActions]
+    
+class DefaultTextResponses(BaseModel):
+    """Default Text repsponse of the MCP server."""
+    
+    response: str
+    
+    
 async def get_llm_response(message, llm_provider = os.environ.get("CURRENT_LLM", "gemini")):
     
     model_config_data = LLMConfiguration().data
@@ -124,3 +70,114 @@ async def get_llm_response(message, llm_provider = os.environ.get("CURRENT_LLM",
     if isinstance(message, str):
         message = [{"role": "user", "content": message}]
     return await llm.get_response(message)
+
+
+async def fetch_workflow_json_async(url: str) -> dict[str, Any]:
+            """Fetch and load JSON from a given URL using httpx (async)."""
+            
+            async with httpx.AsyncClient(timeout=30.0) as http_client:
+                response = await http_client.get(url)
+                response.raise_for_status()
+                return json.loads(response.text)
+            
+   
+async def analyze_invocation(invocation_id: str, user_api_key: str, failure: bool) -> str:
+    # instantiate galaxy client and invocation cacher classes
+    galaxy_client = GalaxyClient(user_api_key)
+    username = galaxy_client.whoami
+    
+    logger.info(f"Loading workflow Invocation with ID: {invocation_id} for explanationn for current Galaxy MCP server user: {username}")
+    
+    # Retrieve invocation details and workflow title concurrently
+    try:
+        def get_invocation_details():
+            return galaxy_client.gi_client.invocations.show_invocation(invocation_id)
+        
+        def get_invocation_report():
+            return galaxy_client.gi_client.invocations.get_invocation_report(invocation_id)
+        
+        invocation_details, invocation_report = await asyncio.gather(
+            asyncio.to_thread(get_invocation_details),
+            asyncio.to_thread(get_invocation_report)
+        )
+    except Exception as e:
+        logger.error(f"Error retrieving invocation details or report: {str(e)}")
+        return f"Error retrieving invocation details or report for ID {invocation_id}: {str(e)}"
+    
+    # Retrieve workflow details using the invocation report
+    workflow_name = invocation_report.get("title", "Unknown")
+    
+    # Initialize explanation string
+    explanation = "\n\n**Invocation details**"
+    explanation += f"\n\nWorkflow Invocation ID: {invocation_id}\nWorkflow Name: {workflow_name}\n"
+    
+    # Check invocation state
+    invocation_state = await invocation_cache.get_invocation_state(username, invocation_id)
+    if invocation_state is None:
+        invocation_raw_state = invocation_details.get('state', "Unknown")
+    
+        if invocation_raw_state == "scheduled":
+            invocation_state = InvocationStates.PENDING.value
+            
+            try:
+                workflow_manager = WorkflowManager(galaxy_client=galaxy_client)
+
+                asyncio.create_task(
+                    invocation_service.get_invocation_result(
+                        invocation_id = invocation_id,
+                        username=username,
+                        api_key = current_api_key_server,
+                        galaxy_client=galaxy_client,
+                        workflow_manager= workflow_manager,
+                        ws_manager=None
+                        )
+                    )
+                explanation += "Workflow invocation still in Pending state. tracking workflow invocation."
+            except Exception as e:
+                logger.error(f"Error retrieving or tracking scheduled invocation: {str(e)}")
+                explanation += f"\nError tracking scheduled invocation: {str(e)}\n"
+        else:
+            invocation_state = InvocationStates.FAILED.value
+    
+    invocation_inputs: dict = invocation_details.get("inputs", {})
+    invocation_input_parameters: dict = invocation_details.get("input_step_parameters", {})
+    if invocation_inputs:
+        explanation += "\n\nInvocation input datasets:\n"
+        explanation += "\n".join(f"  - {label.get('label')}" for label in invocation_inputs.values()) + "\n"
+
+    if invocation_input_parameters:
+        explanation += "\n\nInvocation input parameters:\n"
+        explanation += "\n".join(f"  - {label.get('label')}: {label.get('parameter_value')}" for label in invocation_input_parameters.values()) + "\n"
+    
+    explanation += f"\n\nInvocation State: {invocation_state}\n\n"
+    
+    # If failure is indicated, focus on errors; otherwise, report on outputs
+    if failure or invocation_state not in [InvocationStates.PENDING.value, InvocationStates.COMPLETE.value]:
+        
+        failure = True
+        explanation += "Analysis for failures in the workflow invocation:\n"
+        
+        # Get failure reports or the invocation.
+        explanation += await inv_data_manager.report_invocation_failure(galaxy_client, invocation_id)
+        
+        return explanation
+    if invocation_state == "pending":
+        explanation += "\n\nInvocation still Pending but no indicated failure. Analyzing output datasets:\n"
+    else:
+        explanation += "\n\nInvocation completed without indicated failure. Analyzing output datasets:\n"
+        
+    invocation_outputs = invocation_details.get('outputs', {})
+    invocation_output_collections = invocation_details.get("output_collections", {})
+    
+    if invocation_outputs:
+        explanation += "\n\nInvocation output datasets:\n"
+        explanation += "\n".join(f"  - {label}" for label in invocation_outputs.keys()) + "\n"
+    
+    if invocation_output_collections:
+        explanation += "\n\nInvocation output dataset collections:\n"
+        explanation += "\n".join(f"  - {label}" for label in invocation_output_collections.keys()) + "\n" 
+        
+    if not invocation_outputs and not invocation_output_collections:
+        explanation += "\nNo output datasets or collections found for this invocation.\n"
+    
+    return explanation

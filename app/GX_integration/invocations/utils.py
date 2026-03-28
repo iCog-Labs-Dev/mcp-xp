@@ -10,6 +10,7 @@ from enum import Enum
 logger = logging.getLogger("Invocation")
 
 
+# NOTE: Here are the list of tools used by bioblend to index invocation dataset outputs for visualiztion via JBrowse.
 class FASTAIndexerTools(Enum):
     INDEXER_TOOL = "CONVERTER_fasta_to_fai"
 

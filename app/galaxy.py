@@ -7,7 +7,13 @@ from bioblend import galaxy
 from bioblend.galaxy.objects import GalaxyInstance
 from bioblend.galaxy.client import ConnectionError as GalaxyConnectionError
 from requests.exceptions import RequestException
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type
+    )
 
 load_dotenv()
 
@@ -81,7 +87,12 @@ class GalaxyClient:
                     return {"error": "Invalid whoami response"}
                 return whoami.get("username")
             except (GalaxyConnectionError, RequestException) as e:
-                self.logger.warning("Network error fetching user identity: %s", e)
+                error_msg = str(e) if not isinstance(e, str) else e
+                if "API key has expired" in error_msg:
+                    self.logger.error("Network error fetching user identity: API key expired. Re-authentication required to refresh the token.")
+                else:
+                    self.logger.error("Network error fetching user identity: %s", e)
+
                 raise
             except Exception as e:
                 self.logger.exception("Unexpected error in whoami: %s", e)

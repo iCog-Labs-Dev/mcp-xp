@@ -11,7 +11,16 @@ import json
 import asyncio
 import aiofiles
 
-from fastapi import APIRouter, UploadFile, File, Path, Query, Form, Request, HTTPException, Response
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    Path,
+    Query,
+    Form,
+    Request,
+    Response
+    )
 from fastapi.responses import HTMLResponse
 from fastapi.concurrency import run_in_threadpool
 from bioblend.galaxy.objects.wrappers import HistoryDatasetAssociation, HistoryDatasetCollectionAssociation
@@ -22,7 +31,7 @@ from app.galaxy import GalaxyClient
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
 from app.api.schemas import workflow
 from app.api.socket_manager import ws_manager
-from app.api.socket_enums import SocketMessageEvent, SocketMessageType
+from app.enumerations import SocketMessageEvent, SocketMessageType
 from app.orchestration.invocation_cache import InvocationCache
 from app.orchestration.invocation_tasks import InvocationBackgroundTasks
 from app.enumerations import NumericLimits

@@ -10,8 +10,8 @@ from cryptography.fernet import Fernet
 from fastmcp.server.middleware import MiddlewareContext
 from unittest.mock import Mock, patch, MagicMock
 
-from app.bioblend_server.utils import current_api_key_server
-from app.bioblend_server.utils import JWTGalaxyKeyMiddleware as FastMCPJWTGalaxyKeyMiddleware
+from app.bioblend_server.mcp_context import current_api_key_server
+from app.bioblend_server.mcp_middleware import JWTGalaxyKeyMiddleware as FastMCPJWTGalaxyKeyMiddleware
 
 @pytest.fixture
 def mcp_jwt_logger():
@@ -60,7 +60,7 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         """Test unauthorized response for missing Authorization header."""
         mcp_jwt_logger.info("TEST: test_missing_authorization_header starting")
         caplog.set_level(logging.ERROR)
-        with patch('app.bioblend_server.utils.get_http_headers') as mock_headers:
+        with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {}
             result = await middleware.on_request(mock_context, mock_call_next)
             assert result == {"error": "Unauthorized"}
@@ -74,7 +74,7 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         mcp_jwt_logger.info("TEST: test_invalid_jwt_token starting")
         caplog.set_level(logging.ERROR)
         invalid_token = "invalid.token.here"
-        with patch('app.bioblend_server.utils.get_http_headers') as mock_headers:
+        with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {"Authorization": f"Bearer {invalid_token}"}
             result = await middleware.on_request(mock_context, mock_call_next)
             assert result == {"error": "Unauthorized"}
@@ -89,7 +89,7 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         caplog.set_level(logging.ERROR)
         payload = {"other_claim": "value"}
         token = jwt.encode(payload, key=None, algorithm="none")
-        with patch('app.bioblend_server.utils.get_http_headers') as mock_headers:
+        with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {"Authorization": f"Bearer {token}"}
             result = await middleware.on_request(mock_context, mock_call_next)
             assert result == {"error": "Unauthorized"}
@@ -104,7 +104,7 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         caplog.set_level(logging.ERROR)
         payload = {"galaxy_api_token": ""}
         token = jwt.encode(payload, key=None, algorithm="none")
-        with patch('app.bioblend_server.utils.get_http_headers') as mock_headers:
+        with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {"Authorization": f"Bearer {token}"}
             result = await middleware.on_request(mock_context, mock_call_next)
             assert result == {"error": "Unauthorized"}
@@ -122,7 +122,7 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         encrypted_token = fernet.encrypt(encrypted_payload)
         payload = {"galaxy_api_token": encrypted_token.decode()}
         token = jwt.encode(payload, key=None, algorithm="none")
-        with patch('app.bioblend_server.utils.get_http_headers') as mock_headers:
+        with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {"Authorization": f"Bearer {token}"}
             result = await middleware.on_request(mock_context, mock_call_next)
             

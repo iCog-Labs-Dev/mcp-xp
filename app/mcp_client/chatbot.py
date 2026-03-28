@@ -58,9 +58,9 @@ class ChatSession:
                 for server in self.servers:
                     tools = await server.list_tools()
                     self.logger.info(f"Type of tools: {type(tools)} for {server.name}")
-                    self.tools=tools.tools
-                    all_tools.extend(tools.tools)
-                tools_description = [tool for tool in all_tools]
+                    self.tools=tools
+                    all_tools.extend(tools)
+                tools_description = [tool.__dict__ for tool in all_tools]
             except Exception as e:
                 self.logger.error(f"Error listing tools: {e}")
                 raise RuntimeError(f"Tool listing failed: {e}") from e

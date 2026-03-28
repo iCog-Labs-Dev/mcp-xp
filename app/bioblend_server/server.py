@@ -1,10 +1,10 @@
 import os
+import re
+import json
 from fastmcp import FastMCP
 import logging
-from typing import Any, Optional
-import redis
+from typing import Optional
 import asyncio
-import json
 import httpx
 from contextlib import asynccontextmanager
 
@@ -13,31 +13,35 @@ from qdrant_client.models import PointStruct
 from qdrant_client.http.exceptions import ApiException
 
 from app.log_setup import configure_logging
-from app.bioblend_server.utils import JWTGalaxyKeyMiddleware, current_api_key_server, get_llm_response
 from app.galaxy import GalaxyClient
+
+from app.bioblend_server.mcp_middleware import JWTGalaxyKeyMiddleware
+from app.bioblend_server.mcp_context import current_api_key_server
+
+from app.bioblend_server.utils import (
+    InformerResponse,
+    DefaultTextResponses,
+    get_llm_response,
+    analyze_invocation,
+    fetch_workflow_json_async
+    )
 
 from app.bioblend_server.background_runner import BackgroundIndexer
 from app.bioblend_server.informer.informer import GalaxyInformer
-from app.orchestration.invocation_cache import InvocationCache
-from app.orchestration.invocation_tasks import InvocationBackgroundTasks
-from app.api.endpoints.invocation import show_invocation_result
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
-from app.GX_integration.invocations.data_manager import InvocationDataManager
 
 configure_logging()
 logger = logging.getLogger("fastmcp_bioblend_server")
 
-redis_client = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=os.getenv("REDIS_PORT"), db=0, decode_responses=True)
-invocation_cache = InvocationCache(redis_client)
-invocation_background = InvocationBackgroundTasks(cache = invocation_cache, redis_client = redis_client)
-inv_data_manager = InvocationDataManager(cache = invocation_cache, background_tasks = invocation_background)
-
 if not os.environ.get("GALAXY_API_KEY") or not os.environ.get("QDRANT_HTTP_PORT") or not os.environ.get("CURRENT_LLM"):
     logger.warning("MCP server environment variables are not set.")
 
+# Context Manager for the MCP server.
+
 @asynccontextmanager
 async def mcp_galaxy_lifespan(server: FastMCP):
-    """ Manages the lifecycle of the background indexer.
+    """ 
+    Manages the lifecycle of the background indexer.
     Ensures it starts with the server and shuts down gracefully.
     """
     # 1. Initialize the worker and start loop
@@ -58,33 +62,32 @@ async def mcp_galaxy_lifespan(server: FastMCP):
     
     
 # ==================================== #
-     ## Main FastMCP Server ##
+     ## MCP Server ##
 # ==================================== #
 
 bioblend_app = FastMCP(
-                        name="galaxyTools",
-                        instructions="""
-                                    You have tools for interacting with a Galaxy instance.
-                                    These tools support these distinct capabilities:
-                                    
-                                    (1) (**get_galaxy_information_tool**) Querying **Galaxy information** to retrieve **accurate and upto date details(information)** about available tools, datasets, or workflows in **Galaxy**. 
-                                        Used for tool/workflow recommendations, To respond accurately when asked about the available tools, datasets, or workflows in the galaxy instance.
-                                        used only for gathering information to **respond to galaxy related queries**.
-                                        
-                                    (2) (**execute_galaxy_tool_workflow**) Executing Galaxy operations to run a specific tool or execute a workflow (used only when the user explicitly requests this operation).
-                                    
-                                    Always keep querying and executing strictly separate in purpose and usage.
-                                    """,
-                        middleware=[JWTGalaxyKeyMiddleware()],
-                        lifespan=mcp_galaxy_lifespan
+                    name="galaxyTools",
+                    instructions="""
+                            Galaxy MCP assistant.
+                            Provide information on Galaxy tools, datasets, workflows, and invocations.
+                            Explain failures and recommend fixes.
+                            Import recommended workflows when requested.
+                            
+                            """,
+                    middleware=[JWTGalaxyKeyMiddleware()]
                     )
+
+
+# =============================================================================================================================================================== #
+    ## Tool 2: Galaxy assitant recommendation tool, gives details on galaxy datasets, tools, and workflows both in and outside of the connected galaxy instance ##
+# =============================================================================================================================================================== #
 
 @bioblend_app.tool()
 async def get_galaxy_information_tool(
     query: str,
     query_type: str,
     entity_id: str = None
-) -> str:
+) -> DefaultTextResponses:
     """
     Fetch detailed information on Galaxy tools, workflows, datasets, and invocations.
 
@@ -100,7 +103,8 @@ async def get_galaxy_information_tool(
                    allowing retrieval of information by that specific entity ID.
 
     Returns:
-        A string containing the detailed Galaxy information and the response to the user's query.
+       DefaultTextResponses: A string containing the detailed Galaxy information and the response to the user's query. and a dict with action links of the information fetched.
+        
     """
     logger.info(f"Calling get_galaxy_information with query='{query}', query_type='{query_type}', entity_id='{entity_id}'")
     try:
@@ -114,8 +118,9 @@ async def get_galaxy_information_tool(
         logger.info( f"current Galaxy MCP server user: {galaxy_client.whoami}")
         # Create GalaxyInformer object and execute informer
         informer = await GalaxyInformer.create(galaxy_client=galaxy_client, entity_type=query_type)
-        result = await informer.get_entity_info(search_query = query, entity_id = entity_id)
-        return result
+        response, actions  = await informer.get_entity_info(search_query = query, entity_id = entity_id)
+        
+        return InformerResponse(response = response, actions = actions)
     
     except GalaxyConnectionError as e:
         logger.error(f"Failed to connect to Galaxy: {e}")
@@ -125,11 +130,15 @@ async def get_galaxy_information_tool(
         return f"An error occurred while fetching Galaxy information: {str(e)}"
     
 
+# ========================================================================================================== #
+    ## Tool 2: Invocaiton Analyzing tool, analyzes, summarizes and recommends fixes for failed invocaiton. ##
+# ========================================================================================================== #
+
 @bioblend_app.tool()
 async def explain_galaxy_workflow_invocation(
     invocation_id: str,
     failure: bool
-) -> str:
+) -> DefaultTextResponses:
     """
     Generates a detailed explanation of a Galaxy workflow invocation.
 
@@ -145,7 +154,7 @@ async def explain_galaxy_workflow_invocation(
             output dataset summaries (`False`), if empty it defaults to false.
 
     Returns:
-        str: A clear report of the workflow invocation results or a report explaining failure causes with actionable suggestions.
+        DefaultTextResponses: A clear report of the workflow invocation results or a report explaining failure causes with actionable suggestions.
     """
     
     # Get current user
@@ -187,32 +196,30 @@ async def explain_galaxy_workflow_invocation(
                 - Key output datasets or collections
                 - Next logical steps for the user
                 """
-        
-        response = await get_llm_response(message = invocation_prompt)
-        return response
+        try:
+            response = await get_llm_response(message = invocation_prompt)
+        except Exception as e:
+            logger.error(f"Error preparing structured suggestions, returning full report. {e}")
+            response = invocation_analysis
+            
+        return DefaultTextResponses(response = response)
     
     except GalaxyConnectionError as e:
         logger.error(f"Failed to connect to Galaxy: {e}")
-        return f"Failed to connect to Galaxy: {e}"
+        return DefaultTextResponses(response = "Failed to connect to Galaxy please try again.")
     except Exception as e:
         logger.error(f"Error caused whn trying to fetch invocation details: {e}")
-        return f"Error caused whn trying to fetch invocation details: {e}"
-        
+        return DefaultTextResponses(response = "Error caused whn trying to fetch invocation details.")
 
-async def fetch_workflow_json_async(url: str) -> dict[str, Any]:
-            """Fetch and load JSON from a given URL using httpx (async)."""
-            
-            async with httpx.AsyncClient(timeout=30.0) as http_client:
-                response = await http_client.get(url)
-                response.raise_for_status()
-                return json.loads(response.text)
-            
 
-# TODO: Import workflow from the IWC by its name, for now lets use the url for dev, but improve the workflow
+# ============================================================ #
+    ## Tool 3: Workflow Importing tool after recommendation. ##
+# ============================================================ #
+
 @bioblend_app.tool()
 async def import_workflow_to_galaxy_instance(
     workflow_name: str
-) -> str:
+) -> DefaultTextResponses:
     # TODO: No Galaxy duplicate check add that.
     
     """
@@ -223,7 +230,7 @@ async def import_workflow_to_galaxy_instance(
         workflow_name (str): The Full and exact name of the workflow to import.
 
     Returns:
-        str: A message indicating the import status or an error description.
+        DefaultTextResponses: A message indicating the import status or an error description.
     """
     try:
         
@@ -240,33 +247,49 @@ async def import_workflow_to_galaxy_instance(
         qdrant_client: InformerManager = await InformerManager().create()
 
         # TODO: Fill the workflow collection name (has to be user-specific, so ...)
-        workflow_collection_name: str = ""
-
+        workflow_collection_name: str = "generic_galaxy_workflow"
+        workflow_name_alternative = re.sub(r'workflow', '', workflow_name, flags= re.IGNORECASE) # if there are any uneccessary strings included in the parameter.
+        
         # Step 1: Search for the workflow by name in metadata (synchronous call in thread pool)
-        logger.info(f"Searching for workflow '{workflow_name}' in collection '{workflow_collection_name}' for explanationn for current Galaxy MCP server user: {username}")
+        logger.info(f"Searching for workflow '{workflow_name}' in collection '{workflow_collection_name}'.")
+        logger.info(f"current Galaxy MCP server user: {username}")
         hits = await qdrant_client.match_name_from_collection(
             workflow_collection_name=workflow_collection_name,
             workflow_name = workflow_name
             )
 
         if not hits or not hits[0]:
-            logger.warning(f"Workflow '{workflow_name}' not found in collection '{workflow_collection_name}'")
-            return f"Workflow '{workflow_name}' not found in available workflow collection for import."
-
-        # Extract workflow download URL from point payload
+            
+            hits = await qdrant_client.match_name_from_collection(
+            workflow_collection_name=workflow_collection_name,
+            workflow_name = workflow_name_alternative
+            )
+            
+            if not hits or not hits[0]:
+                logger.warning(f"Workflow '{workflow_name}' not found in collection '{workflow_collection_name}'")
+                response =  f"Workflow '{workflow_name}' not found in available workflow collection for import."
+                return DefaultTextResponses(response = response)
+            
+            # Extract workflow download URL from point payload
         point: PointStruct = hits[0][0]
         workflow_url: Optional[str] = point.payload.get("raw_download_url")
+        workflow_source = point.payload.get("source")
         
         if not workflow_url:
             logger.error(f"No download link found for workflow '{workflow_name}'")
-            return f"Couldn't import workflow '{workflow_name}'."
-
+            response = f"Couldn't import workflow '{workflow_name}'."
+            return DefaultTextResponses(response = response)
+        
         # Fetch the workflow JSON
         logger.info(f"Fetching workflow JSON from IWC repository using URL: {workflow_url}")
         workflow_json: dict = await fetch_workflow_json_async(workflow_url)
 
-        # TODO: Ensure that getting the workflow name is correct.
-        ga_workflow_name: str = workflow_json.get("workflow_name", "")
+        if workflow_source == "workflow_hub":
+            workflow_json: dict = workflow_json.get("content")
+            if isinstance(workflow_json, str):
+                workflow_json = json.loads(workflow_json)
+
+        ga_workflow_name: str = workflow_json.get("name", workflow_json.get("workflow_name", ""))
         if not ga_workflow_name:
             logger.error(f"Workflow JSON does not contain a 'name' field for '{workflow_name}'")
             raise ValueError(f"Workflow JSON does not contain a 'name' field for '{workflow_name}'.")
@@ -280,114 +303,34 @@ async def import_workflow_to_galaxy_instance(
                 )
             )
 
-        return f"{ga_workflow_name} workflow is being imported, mssing tools are being checked and installed, and the workflow will be added to your workflow list shortly."
+        response = (
+            f"{ga_workflow_name} workflow is being imported,"
+            "mssing tools are being checked and installed,"
+            "and the workflow will be added to your workflow list shortly."
+        )
+        
+        return DefaultTextResponses(response = response)
     
     except GalaxyConnectionError as e:
         logger.error(f"Failed to connect to Galaxy: {e}")
-        return f"Failed to connect to Galaxy: {e}"
+        return DefaultTextResponses(response = "Failed to connect to Galaxy.")
+    
     except httpx.HTTPStatusError as http_err:
         logger.error(f"HTTP error fetching workflow from IWC repository: {str(http_err)}")
-        return f"HTTP error occurred while fetching workflow from IWC repository: {str(http_err)}"
+        return DefaultTextResponses(response = "HTTP error occurred while fetching workflow from IWC repository.")
+    
     except httpx.RequestError as req_err:
         logger.error(f"Network error fetching workflow from IWC repository: {str(req_err)}")
-        return f"Request HTTP error occurred while fetching workflow from IWC repository: {str(req_err)}"
+        return DefaultTextResponses(response = "Request HTTP error occurred while fetching workflow from IWC repository.")
+    
     except ApiException as qdrant_err:
-        logger.error(f"Qdrant error during workflow search: {str(qdrant_err)}")
-        return f"Qdrant error occurred during workflow search: {str(qdrant_err)}"
+        logger.error(f"Qdrant error occurred during workflow search: {str(qdrant_err)}")
+        return DefaultTextResponses(response ="Error occured during workflow search.")
+    
     except ValueError as val_err:
         logger.error(f"Validation error: {str(val_err)}")
-        return f"Value error: {str(val_err)}"
+        return DefaultTextResponses(response = "An unexpected error occurred during workflow import.")
+    
     except Exception as exc:
         logger.exception(f"Unexpected error during workflow import: {str(exc)}")
-        return f"An unexpected error occurred during workflow import: {str(exc)}"
-    
-    
-async def analyze_invocation(invocation_id: str, user_api_key: str, failure: bool) -> str:
-    # instantiate galaxy client and invocation cacher classes
-    galaxy_client = GalaxyClient(user_api_key)
-    username = galaxy_client.whoami
-    
-    logger.info(f"Loading workflow Invocation with ID: {invocation_id} for explanationn for current Galaxy MCP server user: {username}")
-    
-    # Retrieve invocation details and workflow title concurrently
-    try:
-        def get_invocation_details():
-            return galaxy_client.gi_client.invocations.show_invocation(invocation_id)
-        
-        def get_invocation_report():
-            return galaxy_client.gi_client.invocations.get_invocation_report(invocation_id)
-        
-        invocation_details, invocation_report = await asyncio.gather(
-            asyncio.to_thread(get_invocation_details),
-            asyncio.to_thread(get_invocation_report)
-        )
-    except Exception as e:
-        logger.error(f"Error retrieving invocation details or report: {str(e)}")
-        return f"Error retrieving invocation details or report for ID {invocation_id}: {str(e)}"
-    
-    # Retrieve workflow details using the invocation report
-    workflow_name = invocation_report.get("title", "Unknown")
-    
-    # Initialize explanation string
-    explanation = "\n\n**Invocation details**"
-    explanation += f"\n\nWorkflow Invocation ID: {invocation_id}\nWorkflow Name: {workflow_name}\n"
-    
-    # Check invocation state
-    invocation_state = await invocation_cache.get_invocation_state(username, invocation_id)
-    if invocation_state is None:
-        invocation_raw_state = invocation_details.get('state', "Unknown")
-    
-        if invocation_raw_state == "scheduled":
-            invocation_state = "Pending"
-            
-            try:
-                asyncio.create_task(show_invocation_result(invocation_id=invocation_id, internal_api=user_api_key))
-                explanation += "Workflow invocation still in Pending state. tracking workflow invocation."
-            except Exception as e:
-                logger.error(f"Error retrieving or tracking scheduled invocation: {str(e)}")
-                explanation += f"\nError tracking scheduled invocation: {str(e)}\n"
-        else:
-            invocation_state = "Failed"
-    
-    invocation_inputs: dict = invocation_details.get("inputs", {})
-    invocation_input_parameters: dict = invocation_details.get("input_step_parameters", {})
-    if invocation_inputs:
-        explanation += "\n\nInvocation input datasets:\n"
-        explanation += "\n".join(f"  - {label.get('label')}" for label in invocation_inputs.values()) + "\n"
-
-    if invocation_input_parameters:
-        explanation += "\n\nInvocation input parameters:\n"
-        explanation += "\n".join(f"  - {label.get('label')}: {label.get('parameter_value')}" for label in invocation_input_parameters.values()) + "\n"
-    
-    explanation += f"\n\nInvocation State: {invocation_state}\n\n"
-    
-    # If failure is indicated, focus on errors; otherwise, report on outputs
-    if failure or invocation_state not in ["Pending", "Complete"]:
-        
-        failure = True
-        explanation += "Analysis for failures in the workflow invocation:\n"
-        
-        # Get failure reports or the invocation.
-        explanation += await inv_data_manager.report_invocation_failure(galaxy_client, invocation_id)
-        
-        return explanation
-    if invocation_state == "pending":
-        explanation += "\n\nInvocation still Pending but no indicated failure. Analyzing output datasets:\n"
-    else:
-        explanation += "\n\nInvocation completed without indicated failure. Analyzing output datasets:\n"
-        
-    invocation_outputs = invocation_details.get('outputs', {})
-    invocation_output_collections = invocation_details.get("output_collections", {})
-    
-    if invocation_outputs:
-        explanation += "\n\nInvocation output datasets:\n"
-        explanation += "\n".join(f"  - {label}" for label in invocation_outputs.keys()) + "\n"
-    
-    if invocation_output_collections:
-        explanation += "\n\nInvocation output dataset collections:\n"
-        explanation += "\n".join(f"  - {label}" for label in invocation_output_collections.keys()) + "\n" 
-        
-    if not invocation_outputs and not invocation_output_collections:
-        explanation += "\nNo output datasets or collections found for this invocation.\n"
-    
-    return explanation
+        return DefaultTextResponses(response = "An unexpected error occurred during workflow import.")

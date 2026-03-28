@@ -1,5 +1,11 @@
 from fastapi import APIRouter
-from app.api.endpoints import histories, tools, workflows, invocation
+from app.api.endpoints import (
+    dataset,
+    histories,
+    tools,
+    workflows,
+    invocation
+    )
 
 api_router = APIRouter()
 
@@ -28,4 +34,11 @@ api_router.include_router(
     invocation.router,
     prefix="/invocation",
     tags=["Invocation"]
+)
+
+# Include the dataset router with a prefix and tags
+api_router.include_router(
+    dataset.router,
+    prefix="/dataset",
+    tags=["Date Adoption"]
 )

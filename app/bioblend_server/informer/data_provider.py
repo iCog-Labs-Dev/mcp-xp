@@ -1,9 +1,10 @@
 import httpx
 import json
+import copy
 from rapidfuzz import fuzz
 import re
 import logging
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, Tuple, Optional
 from urllib.parse import quote
 
 from app.galaxy import GalaxyClient
@@ -200,7 +201,7 @@ class GalaxyDataProvider:
              
         return workflows, name_corpus
     
-    def show_workflow(self, workflow_id):
+    def show_workflow(self, workflow_id) -> Tuple[Dict[str, Any], str, Optional[str]]:
         """Retrieve and clean workflow metadata."""
 
         try:
@@ -213,15 +214,15 @@ class GalaxyDataProvider:
         self.log.debug(json.dumps(workflow, ensure_ascii=False))
 
         try:
-            cleaned_workflow_data = self._clean_workflow_metadata(workflow)
+            cleaned_workflow_data, workflow_name, workflow_link = self._clean_workflow_metadata(workflow)
         except Exception as e:
             self.log.warning(f"Workflow metadata cleaning failed: {e}", exc_info=True)
-            cleaned_workflow_data = workflow
+            return workflow, workflow["name"], None
 
-        return cleaned_workflow_data
+        return cleaned_workflow_data, workflow_name, workflow_link
 
     
-    async def show_tool(self, tool_id):
+    async def show_tool(self, tool_id) -> Tuple[Dict[str, Any], str, Optional[str]]:
         """Retrieve tool metadata with safe error handling."""
         
         headers = {'x-api-key': self.galaxy_client.user_api_key}
@@ -240,23 +241,25 @@ class GalaxyDataProvider:
             raise
 
         try:
-            cleaned_tool_data = await self._clean_tool_metadata(tool)
+            cleaned_tool_data, tool_name, tool_link = await self._clean_tool_metadata(tool)
         except Exception as e:
             self.log.warning(f"Tool metadata cleaning failed: {e}", exc_info=True)
-            cleaned_tool_data = tool
+            return tool, tool["name"], None
 
-        return  cleaned_tool_data
+        return  cleaned_tool_data, tool_name, tool_link
     
-    def show_dataset(self, dataset_id):
+    def show_dataset(self, dataset_id: str) ->  Tuple[Dict[str, Any], str, str]:
         """Retrieve dataset metadata with safe error handling."""
 
         try:
             dataset = self.gi_user.datasets.show_dataset(dataset_id)
+            dataset_link = f"{self.galaxy_client.galaxy_url}/datasets/{dataset_id}/details"
+            dataset_name = dataset["name"]
         except Exception as e:
             self.log.error(f"Failed to fetch dataset {dataset_id}: {e}", exc_info=True)
             raise
 
-        return dataset
+        return dataset, dataset_name, dataset_link
     
     def _prune_empty_nested(self, obj: Union[Dict[str, Any], list]) -> Union[Dict[str, Any], list]:
         """Recursively prune empty key-value pairs, lists, and dicts from nested structures."""
@@ -279,11 +282,12 @@ class GalaxyDataProvider:
             obj[:] = [item for item in (self._prune_empty_nested(item) for item in obj) if item not in [None, '', [], {}]]
         return obj
     
-    async def _clean_tool_metadata(self, raw_tool: Dict[str, Any]) -> Dict[str, Any]:
+    async def _clean_tool_metadata(self, raw_tool: Dict[str, Any]) ->  Tuple[Dict[str, Any], str, str]:
         """Clean tool metadata for RAG compatibility."""
 
-        tool = raw_tool.copy()
-
+        tool = copy.deepcopy(raw_tool)
+        tool_link = None
+        tool_name = None
         # Step 1: Drop only junk (UI/runtime/internal keeps all semantics)
         universal_drops = [
             'model_class', 'icon', 'hidden', 'config_file', 'panel_section_id', 'form_style',
@@ -338,6 +342,7 @@ class GalaxyDataProvider:
         # Step 5: Add universal derived fields
         tool['tool_id'] = tool.get('id', 'unknown')
         tool['tool name'] = tool.get('name', 'unknown')
+        tool_name = tool['tool name']
         if 'name' in tool:
             del tool['name']
             
@@ -349,7 +354,7 @@ class GalaxyDataProvider:
         
         # Add link to for execution.
         tool_url = quote(tool_id, safe = "")
-        tool['Link to execute tool'] = f"{self.galaxy_client.galaxy_url}/?tool_id={tool_url}&version=latest"
+        tool_link = f"{self.galaxy_client.galaxy_url}/?tool_id={tool_url}&version=latest"
         
         if 'panel_section_name' in tool:
             del tool['panel_section_name']
@@ -359,17 +364,20 @@ class GalaxyDataProvider:
             if k in tool and isinstance(tool[k], list) and len(tool[k]) > 10:
                 tool[k + '_truncated'] = tool[k][:10] + ['...']
         
-        return tool
+        return tool, tool_name, tool_link
     
-    def _clean_workflow_metadata(self, raw_workflow: Dict[str, Any]) -> Dict[str, Any]:
+    def _clean_workflow_metadata(self, raw_workflow: Dict[str, Any]) ->  Tuple[Dict[str, Any], str, Optional[str]]:
         """Clean and enrich workflow metadata for RAG compatibility."""
         
         # Initial Safety Guard: Ensure input is a dictionary
         if not isinstance(raw_workflow, dict):
             self.log.error("Input to _clean_workflow_metadata was not a dictionary.")
-            return {}
+            return {}, None, None
 
-        workflow = raw_workflow.copy() 
+        workflow = copy.deepcopy(raw_workflow)
+        workflow_link = None
+        workflow_name = None
+        
         try:
             # Step 1: Remove universal non-semantic fields
             universal_drops = [
@@ -435,7 +443,7 @@ class GalaxyDataProvider:
                     key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0
                 )
                 
-                for step_id, step in sorted_steps:
+                for _, step in sorted_steps:
                     # CORRECTION 2: Type Guard for safety
                     if not isinstance(step, dict):
                         continue
@@ -447,7 +455,7 @@ class GalaxyDataProvider:
                                             
                     # For subworkflows, recursively clean the metadata
                     if step.get('type') == 'subworkflow':
-                        step = self._clean_workflow_metadata(step)
+                        step, _, _ = self._clean_workflow_metadata(step)
                     
                     # Structure tool info better
                     if step.get('type') == 'tool':
@@ -494,6 +502,7 @@ class GalaxyDataProvider:
             # Step 6: Add derived fields
             workflow['workflow_id'] = raw_workflow.get('id', 'unknown')
             workflow['workflow name'] = raw_workflow.get('name', 'unknown')
+            workflow_name = workflow['workflow name']
             
             tags = workflow.get('tags')
             if isinstance(tags, list) and tags:
@@ -503,13 +512,14 @@ class GalaxyDataProvider:
             
             workflow_id = workflow['workflow_id']
             if workflow_id != 'unknown' and hasattr(self, 'galaxy_client') and hasattr(self.galaxy_client, 'galaxy_url'):
-                workflow['Link to execute workflow'] = f"{self.galaxy_client.galaxy_url}/workflows/run?id={workflow_id}"
+                workflow_link = f"{self.galaxy_client.galaxy_url}/workflows/run?id={workflow_id}"
                                         
             # Final prune
             self._prune_empty_nested(workflow)
             
         except Exception as e:
             self.log.error(f"Error cleaning metadata for Galaxy workflow: {e}")
-            return raw_workflow
-
-        return workflow
+            return raw_workflow, workflow_name, None
+        if workflow_link:
+            return workflow, workflow_name, workflow_link
+        return workflow, workflow_name, None

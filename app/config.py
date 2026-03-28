@@ -1,4 +1,5 @@
 
+import yaml
 import json
 import os
 from typing import Any
@@ -60,5 +61,5 @@ class Configuration:
             JSONDecodeError: If configuration file is invalid JSON.
         """
         with open(file_path, "r") as f:
-            return json.load(f)
+            return yaml.safe_load(f)
 

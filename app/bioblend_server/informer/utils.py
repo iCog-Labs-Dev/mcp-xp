@@ -1,5 +1,5 @@
 import os
-import json
+import yaml
 import numpy as np
 from enum import IntEnum, Enum
 from dotenv import load_dotenv
@@ -43,6 +43,10 @@ class SearchThresholds(Enum):
 class WorkflowGitubScraperUrl(Enum):
     GITHUB_SCRAPE_URL = "https://api.github.com/repos/galaxyproject/iwc/contents/workflows"
     RAW_BASE_URL = "https://raw.githubusercontent.com/galaxyproject/iwc/main/workflows"
+
+class WorkflowHubScraperUrl(Enum):
+    BASE_URL = "https://workflowhub.eu"
+    TRS_BASE_URL = "https://workflowhub.eu/ga4gh/trs/v2"
     
 class EmbeddingModel(Enum):
     """Defines supported embedding models and their vector sizes."""
@@ -52,7 +56,7 @@ class EmbeddingModel(Enum):
     GEMINI_TEXT_EMBEDDING_004 = ("text-embedding-004", 2048)
     OPENAI_TEXT_EMBEDDING_3_SMALL = ("text-embedding-3-small", 1536)
     OPENAI_TEXT_EMBEDDING_3_LARGE = ("text-embedding-3-large", 3072)
-    E5_MODEL = ("intfloat/e5-base-v2", 768)
+    E5_MODEL = ("intfloat/e5-large-v2", 1024)
 
     @property
     def model_name(self) -> str:
@@ -65,8 +69,8 @@ class EmbeddingModel(Enum):
 class LLMResponse:
     def __init__(self):
         self.config = None
-        with open('app/AI/llm_config/llm_config.json', 'r') as f:
-            self.config = json.load(f)
+        with open("app/llm_config.yaml", 'r') as f:
+            self.config = yaml.safe_load(f)
             
     @property
     def embedding_size(self) -> int:
@@ -84,7 +88,7 @@ class LLMResponse:
     @property
     def embedder(self) -> LLMProvider:
         provider = EmbeddingProvider(os.getenv("CURRENT_EMBEDDER", EmbeddingProvider.GEMINI.value)).value
-        selected_config = LLMModelConfig(self.config['providers'][provider])
+        selected_config = LLMModelConfig(self.config['providers']["openai"])
         if provider == EmbeddingProvider.GEMINI.value:
             return GeminiProvider(model_config=selected_config)
         elif provider == EmbeddingProvider.OPENAI.value:

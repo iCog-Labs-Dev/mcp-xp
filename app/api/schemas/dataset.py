@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class CollectionCreate(BaseModel):
     """Request body for creating a new dataset collection from existing datasets."""
@@ -43,3 +43,13 @@ class HistoryContentsResponse(BaseModel):
     """Response schema for listing the contents of a history."""
     datasets: List[DatasetInfo]
     collections: List[DatasetInfo]
+    
+class LocalDatasetImportResponse(BaseModel):
+    """Response schema for local file adoption."""
+    dataset_id: str
+    history_id: str
+
+class IndexingResponse(BaseModel):
+    status: str
+    message: str
+    dataset: Optional[DatasetInfo] = None

@@ -4,13 +4,35 @@ import redis
 import logging
 import asyncio
 
-from app.enumerations import TTLiveConfig
+from contextlib import asynccontextmanager
+
+from app.enumerations import TTLiveConfig, InvocationStates
 
 class InvocationCache:
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
         self.log = logging.getLogger(__class__.__name__)
-        
+    
+    @asynccontextmanager
+    async def acquire_lock(self, lock_key: str, timeout: int = 15, retry_delay: float = 0.1):
+        """Async context manager for distributed lock using Redis SETNX."""
+        acquired = False
+        try:
+            while not acquired:
+                acquired = await asyncio.to_thread(
+                    self.redis.set,
+                    name = lock_key,
+                    value = "locked",
+                    nx=True, 
+                    ex=timeout
+                    )
+                if not acquired:
+                    await asyncio.sleep(retry_delay)
+            yield
+        finally:
+            if acquired:
+                await asyncio.to_thread(self.redis.delete, lock_key)
+                
     async def get_workflows_cache(self, username: str) -> Optional[List[Dict]]:
         """Get cached processed workflows list"""
         try:
@@ -184,7 +206,7 @@ class InvocationCache:
     async def set_invocation_state(self, username: str, invocation_id: str, state: str):
         """Set or update an invocation state inside the hash for a given API key"""
         try:
-            if state not in {"Pending", "Failed", "Complete"}:
+            if state not in {InvocationStates.PENDING.value, InvocationStates.FAILED.value, InvocationStates.COMPLETE.value}:
                 raise ValueError(f"Invalid state: {state}")
             cache_key = f"invocation_states:{username}"
             await asyncio.to_thread(self.redis.hset, cache_key, invocation_id, state)
@@ -243,3 +265,32 @@ class InvocationCache:
             
         except Exception as e:
             self.log.error(f"Failed to clear deleted workflows for user: {username}: {e}")
+    
+    async def get_dataset_index(self, username: str, unique_id: str) -> Optional[Dict]:
+        """Get cached dataset index result"""
+        try:
+            cache_key = f"dataset_index:{username}:{unique_id}"
+            cached_data = await asyncio.to_thread(self.redis.get, cache_key)
+            if cached_data:
+                return json.loads(cached_data)
+            return None
+        except Exception as e:
+            self.log.error(f"Error getting dataset index: {e}")
+            return None
+
+    async def set_dataset_index(self, username: str, unique_id: str, index_data: Dict, ttl: int = TTLiveConfig.SHORT_TTL.value):
+        """Cache dataset index result"""
+        try:
+            cache_key = f"dataset_index:{username}:{unique_id}"
+            await asyncio.to_thread(self.redis.setex, cache_key, ttl, json.dumps(index_data))
+        except Exception as e:
+            self.log.error(f"Error setting dataset index: {e}")
+    
+    async def delete_dataset_index(self, username: str, unique_id: str) -> None:
+        """Remove cached dataset index result (used on failure or forced retry)"""
+        try:
+            cache_key = f"dataset_index:{username}:{unique_id}"
+            await asyncio.to_thread(self.redis.delete, cache_key)
+            self.log.info(f"Deleted dataset index cache for {username}:{unique_id}")
+        except Exception as e:
+            self.log.error(f"Error deleting dataset index: {e}")

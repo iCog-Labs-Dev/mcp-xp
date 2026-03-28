@@ -13,8 +13,11 @@ from bioblend.galaxy.toolshed import ToolShedClient
 
 from app.galaxy import GalaxyClient
 from app.api.socket_manager import SocketManager
-from app.api.socket_enums import SocketMessageEvent, SocketMessageType
-from app.enumerations import NumericLimits
+from app.enumerations import (
+    NumericLimits,
+    SocketMessageEvent,
+    SocketMessageType
+    )
 
 class WorkflowInstaller:
     """Handles tool installation and workflow upload operations"""

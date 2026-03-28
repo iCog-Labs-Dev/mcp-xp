@@ -21,8 +21,12 @@ from app.GX_integration.tool_manager import ToolManager
 from app.GX_integration.form_generator import WorkflowFormGenerator
 from app.api.socket_manager import SocketManager
 
+from app.enumerations import InvocationStates
+
 from app.GX_integration.workflows.worklfow_installer import WorkflowInstaller
 from app.GX_integration.workflows.workflow_invocation import WorkflowInvocationHandler
+
+
 class WorkflowManager:
     """Workflow manager class for managing Galaxy workflows"""
 
@@ -211,7 +215,7 @@ class WorkflowManager:
             except Exception as e:
                 # Handle failure safely
                 self.log.error(f"Error tracking invocations: {e}")
-                return {}, "Failed", None
+                return {}, InvocationStates.FAILED.value, None
         
         else:
             try:

@@ -13,6 +13,21 @@ import xml.etree.ElementTree as ET
 from bioblend.galaxy import GalaxyInstance
 
 from app.bioblend_server.informer.utils import SearchThresholds
+import tiktoken
+
+MODEL_NAME = "text-embedding-3-small"
+MAX_TOKENS = 8000  
+
+#TODO: Fix here
+def truncate_to_token_limit(text, model=MODEL_NAME, max_tokens=MAX_TOKENS):
+    enc = tiktoken.encoding_for_model(model)
+    tokens = enc.encode(text)
+    
+    if len(tokens) > max_tokens:
+        tokens = tokens[:max_tokens]
+    
+    return enc.decode(tokens)
+
 
 
 class GalaxyToolScraper:
@@ -142,13 +157,15 @@ class GalaxyToolScraper:
                 f"The current version of the tool is {version if version else 'unspecified'}. "
                 f"Here is the help or usage information: {help_text if help_text else 'No help content provided.'}"
             )
+            # Usage
+            cropped_context = truncate_to_token_limit(content)
 
             return {
                 "tool_id": tool_id,
                 "name": name,
                 "description": description,
                 "help": help_text,
-                "content": content
+                "content": cropped_context
             }
 
         except Exception as e:

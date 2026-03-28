@@ -7,16 +7,26 @@ from sys import path
 path.append(".")
 
 from fastapi.concurrency import run_in_threadpool
-from bioblend.galaxy.objects.wrappers import HistoryDatasetAssociation, HistoryDatasetCollectionAssociation
+from bioblend.galaxy.objects.wrappers import (
+    HistoryDatasetAssociation,
+    HistoryDatasetCollectionAssociation
+    )
 
 from app.galaxy import GalaxyClient
+from app.persistence import MongoStore
 from app.GX_integration.workflows.workflow_manager import WorkflowManager
 from app.GX_integration.invocations.output_indexer import OutputIndexer
 from app.api.schemas import invocation
 from app.api.socket_manager import SocketManager
-from app.api.socket_enums import SocketMessageEvent, SocketMessageType
 from app.orchestration.invocation_cache import InvocationCache
-from app.enumerations import NumericLimits, JobState
+from app.enumerations import (
+    NumericLimits,
+    JobState,
+    InvocationStates,
+    CollectionNames,
+    SocketMessageEvent,
+    SocketMessageType
+    )
 
 from app.GX_integration.invocations.data_manager import InvocationDataManager
 
@@ -36,7 +46,8 @@ class InvocationTracker:
         username: str,
         invocations_data: list[dict],
         workflow_mapping: dict[str, dict],
-        workflow_manager: WorkflowManager
+        workflow_manager: WorkflowManager,
+        mongo_client: MongoStore
     ) -> list[invocation.InvocationListItem]:
         """Format invocations with optimized state mapping"""
     
@@ -65,7 +76,8 @@ class InvocationTracker:
                 username=username,
                 raw_state=inv.get('state'),
                 invocation_id=inv.get("id"),
-                workflow_manager=workflow_manager
+                workflow_manager=workflow_manager,
+                mongo_client = mongo_client
             )
             for inv, _, _ in filtered_invocations
         ]
@@ -79,6 +91,7 @@ class InvocationTracker:
                 workflow_id=workflow_id,
                 history_id=inv.get('history_id'),
                 state=state,
+                outputs=[],
                 create_time=inv.get('create_time'),
                 update_time=inv.get('update_time')
             )
@@ -95,7 +108,8 @@ class InvocationTracker:
         username: str,
         raw_state: str,
         invocation_id: str,
-        workflow_manager: WorkflowManager
+        workflow_manager: WorkflowManager,
+        mongo_client: MongoStore
     ) -> str:
         """Map Galaxy invocation states to user-friendly states"""
         
@@ -104,32 +118,40 @@ class InvocationTracker:
         if cached_state:
             self.log.debug(f"Getting cached invocation state: {cached_state}")
             return cached_state
+        
+        stored_state = await mongo_client.get_element(collection_name = CollectionNames.INVOCATION_STATES.value, key = username, field = invocation_id)
+        
+        if stored_state:
+            self.log.debug("Getting stored invocation state.")
+            return stored_state
 
         if not raw_state:
             self.log.warning("Invocation state is None or empty")
-            return "Failed"
+            return InvocationStates.FAILED.value
         
         # Define state mappings
         failed_states = {"cancelled", "failed", "cancelling"}
         pending_states = {"requires_materialization", "ready", "new", "scheduled"}
         
         if raw_state in failed_states:
-            return "Failed"
+            return InvocationStates.FAILED.value
 
         elif raw_state in pending_states:
             return await self.compute_deep_invocation_state(
                 workflow_manager = workflow_manager,
+                mongo_client = mongo_client,
                 invocation_id = invocation_id,
                 username = username
             )
 
         else:
             self.log.warning(f"Unknown invocation state: {raw_state}")
-            return "Failed"
+            return InvocationStates.FAILED.value
         
     async def compute_deep_invocation_state(
         self,
         workflow_manager: WorkflowManager,
+        mongo_client: MongoStore,
         invocation_id: str,
         username: str
     ) -> str:
@@ -172,22 +194,21 @@ class InvocationTracker:
                 elif failed_jobs > 0 and failed_jobs < total_jobs:
                     step_state = JobState.RUNNING.value
                 else:
-                    step_state = 'Pending'
+                    step_state = InvocationStates.PENDING.value
 
                 if step_state != JobState.OK.value:
                     all_ok = False
 
             if has_failed:
-                inv_state = "Failed"
+                inv_state = InvocationStates.FAILED.value
             elif all_ok:
-                inv_state = "Complete"
+                inv_state = InvocationStates.COMPLETE.value
             else:
-                inv_state = "Pending"
+                inv_state = InvocationStates.PENDING.value
             
-            await self.cache.set_invocation_state(username = username,
-                                                        invocation_id = invocation_id,
-                                                        state = inv_state
-                                                        )
+            asyncio.create_task(mongo_client.set_element(collection_name = CollectionNames.INVOCATION_STATES.value, key = username, field = invocation_id, value = inv_state))
+            asyncio.create_task(self.cache.set_invocation_state(username, invocation_id, inv_state))
+            
             return inv_state
             
         except Exception as e:
@@ -199,6 +220,7 @@ class InvocationTracker:
         invocation_id: str,
         galaxy_client: GalaxyClient,
         workflow_manager: WorkflowManager,
+        mongo_client: MongoStore,
         history_id: str,
         create_time: str,
         last_update_time: str,
@@ -209,7 +231,7 @@ class InvocationTracker:
     ):
         """Background task to track invocation and cache results"""
         username = galaxy_client.whoami
-        output_indexer = OutputIndexer(username = username, galaxy_client = galaxy_client, cache = self.cache, ws_manager = ws_manager)
+        output_indexer = OutputIndexer(username = username, galaxy_client = galaxy_client, cache = self.cache, mongo_client = mongo_client, ws_manager = ws_manager)
         
         try:
     
@@ -228,10 +250,14 @@ class InvocationTracker:
                 invocation_check=True
             )
             
-            # Set invocation to cache
-            await self.cache.set_invocation_state(username, invocation_id, inv_state)
+            # Set invocation to cache and persist as well.
+        
+            await asyncio.gather(
+                self.cache.set_invocation_state(username, invocation_id, inv_state),
+                mongo_client.set_element(collection_name = CollectionNames.INVOCATION_STATES.value, key = username, field = invocation_id, value = inv_state)
+                )
 
-            if inv_state == "Failed":
+            if inv_state == InvocationStates.FAILED.value:
                 
                 invocation_report = await self.inv_data_manager.report_invocation_failure(galaxy_client, invocation_id)
                 workflow_result, _ = await self.inv_data_manager.structure_outputs(
@@ -253,7 +279,9 @@ class InvocationTracker:
                 "workflow": workflow_description.model_dump(),
                 "report": invocation_report
             }
-            await self.cache.set_invocation_result(username, invocation_id, result_dict)
+            
+            asyncio.create_task(self.cache.set_invocation_result(username, invocation_id, result_dict))
+            asyncio.create_task(mongo_client.set(collection_name = CollectionNames.INVOCATION_RESULTS.value, key = f"{username}:{invocation_id}", value = result_dict))
             
             self.log.info("Invocation results are complete and ready.")
             if ws_manager:
@@ -268,14 +296,14 @@ class InvocationTracker:
                 )
             
             # Index invocation outputs
-            await output_indexer.index_datasets(invocation_result= result_dict)
+            await output_indexer.index_datasets_and_register(invocation_result= result_dict)
 
 
         except Exception as e:
             self.log.error(f"Error in background tracking for {invocation_id}: {e}")
             result_dict = {
                 "invocation_id": invocation_id,
-                "state": "Failed",
+                "state": InvocationStates.FAILED.value,
                 "history_id": history_id,
                 "create_time": create_time,
                 "update_time": last_update_time,
@@ -284,24 +312,48 @@ class InvocationTracker:
                 "workflow": workflow_description.model_dump(),
                 "report": None
             }
-            await self.cache.set_invocation_result(username, invocation_id, result_dict)
+            
+            await asyncio.gather(
+                self.cache.set_invocation_result(username, invocation_id, result_dict),
+                mongo_client.set(collection_name = CollectionNames.INVOCATION_RESULTS.value, key = f"{username}:{invocation_id}", value = result_dict)
+                )
 
         finally:
-            await run_in_threadpool(self.redis_client.delete, tracking_key)
+            await asyncio.to_thread(self.redis_client.delete, tracking_key)
 
     
     async def cancel_invocation_and_delete_data(
         self,
         invocation_ids: List[str],
         workflow_manager: WorkflowManager,
-        username: str
+        username: str,
+        mongo_client: MongoStore
     ):
         """Cancel invocations and delete associated data"""
-        try:    
-            for invocation_id in invocation_ids:
+        initial_deletions = [
+            mongo_client.delete_specific(
+                collection_name=CollectionNames.INVOCATION_LISTS.value,
+                key=username,
+                elements=invocation_ids
+            ),
+            mongo_client.remove_from_set(
+                collection_name=CollectionNames.INVOCATION_IDS.value,
+                key=username,
+                elements=invocation_ids
+            ),
+            mongo_client.delete_elements(
+                collection_name= CollectionNames.INVOCATION_STATES.value,
+                key = username,
+                fields=invocation_ids
+            )
+        ]
 
+        semaphore = asyncio.Semaphore(NumericLimits.SEMAPHORE_LIMIT.value)
+
+        async def handle_invocation(invocation_id: str):
+            async with semaphore:
                 # Get the invocation object
-                _invocation = await run_in_threadpool(
+                _invocation = await asyncio.to_thread(
                     workflow_manager.gi_object.invocations.get,
                     id_=invocation_id
                 )
@@ -310,7 +362,7 @@ class InvocationTracker:
                 state = _invocation.state
                 terminal_states = {'cancelled', 'failed', 'scheduled', 'error'}  # 'scheduled' often means completed
                 if state not in terminal_states:
-                    await run_in_threadpool(
+                    await asyncio.to_thread(
                         workflow_manager.gi_object.gi.invocations.cancel_invocation,
                         invocation_id=invocation_id
                     )
@@ -326,15 +378,43 @@ class InvocationTracker:
                     invocation_check=True
                 )
                 
-                # Concurrently delete invication output datasets.
-                delete_datasets = [asyncio.to_thread(ds.delete, purge= True) for ds in outputs if isinstance(ds, HistoryDatasetAssociation)]
-                delete_collections = [asyncio.to_thread(ds.delete) for ds in outputs if isinstance(ds, HistoryDatasetCollectionAssociation)]       
-                await asyncio.gather(*delete_datasets, *delete_collections, return_exceptions= False)
+                # Prepare concurrent deletions for invocation outputs
+                delete_datasets = [asyncio.to_thread(ds.delete, purge=True) for ds in outputs if isinstance(ds, HistoryDatasetAssociation)]
+                delete_collections = [asyncio.to_thread(ds.delete) for ds in outputs if isinstance(ds, HistoryDatasetCollectionAssociation)]
                 
-                # Delete invocation states saved earlier.
-                await asyncio.gather(*[self.cache.delete_invocation_state(username, inv_id) for inv_id in invocation_ids])
+                # Mongo and cache deletions
+                mongo_del = mongo_client.delete(
+                    collection_name=CollectionNames.INVOCATION_RESULTS.value,
+                    key=f"{username}:{invocation_id}",
+                )
+                cache_del = self.cache.delete_invocation_state(username, invocation_id=invocation_id)
                 
+                # Gather all per-invocation deletions concurrently
+                await asyncio.gather(
+                    *delete_datasets,
+                    *delete_collections,
+                    mongo_del,
+                    cache_del,
+                    return_exceptions=True
+                )
+
+        try:
+            # Create handlers for each invocation (limited by semaphore internally)
+            invocation_handlers = [handle_invocation(invocation_id) for invocation_id in invocation_ids]
             
-            self.log.info(f"Invocation {invocation_ids} deletion complete.")
+            # Gather initial deletions and invocation handlers concurrently
+            results = await asyncio.gather(*initial_deletions, *invocation_handlers, return_exceptions=True)
+            
+            exceptions = [r for r in results if isinstance(r, Exception)]
+
+            if exceptions:
+                for exc in exceptions:
+                    self.log.error(
+                        "Invocation deletion failure.",
+                        exc_info=exc
+                    )
+            else:
+             self.log.info(f"Invocation {invocation_ids} deletion complete.")
+
         except Exception as e:
-                self.log.error(f"Error while deleting invocation: {e}")
+            self.log.error(f"Error while deleting invocation: {e}")

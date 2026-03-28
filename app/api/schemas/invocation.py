@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Dict, Annotated, Union, Any, Literal, Optional
+from app.api.schemas.dataset import DatasetInfo
 from app.api.schemas.workflow import OutputDataset, CollectionOutputDataset
 
 from app.api.schemas.workflow import WorkflowListItem
@@ -10,6 +11,7 @@ class InvocationListItem(BaseModel):
     workflow_id: str
     history_id: str
     state: Literal["Pending", "Failed", "Complete"]
+    outputs: List[DatasetInfo]
     create_time: str
     update_time: str
 
@@ -19,7 +21,6 @@ class InvocationList(BaseModel):
 class InputParameter(BaseModel):
     type: Literal["parameter"]
     value: Any
-
 
 class InvocationResult(BaseModel):
     invocation_id: str
