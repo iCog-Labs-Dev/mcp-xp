@@ -294,3 +294,11 @@ class InvocationCache:
             self.log.info(f"Deleted dataset index cache for {username}:{unique_id}")
         except Exception as e:
             self.log.error(f"Error deleting dataset index: {e}")
+
+    async def delete_response_cache(self, username: str):
+        """Invalidate the unfiltered invocation list response cache."""
+        try:
+            cache_key = f"invocations_response:{username}:all:all"
+            await asyncio.to_thread(self.redis.delete, cache_key)
+        except Exception as e:
+            self.log.error(f"Error deleting response cache: {e}")
