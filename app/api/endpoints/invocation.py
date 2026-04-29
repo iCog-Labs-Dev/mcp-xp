@@ -172,6 +172,31 @@ async def show_invocation_result(
         logger.error(f"Failed to show invocation result: {e}")
         raise  InternalServerErrorException("Failed to show invocation result")
         
+@router.post(
+    "/{invocation_id}/cancel",
+    summary="Cancel a running workflow invocation",
+    tags=["Invocation"],
+    status_code=HTTP_204_NO_CONTENT
+)
+async def cancel_workflow_invocation(
+    invocation_id: str = Path(..., description="The ID of the invocation to cancel")
+) -> Response:
+    try:
+        api_key = current_api_key.get()
+        galaxy_client = GalaxyClient(api_key)
+        username = galaxy_client.whoami
+        workflow_manager = WorkflowManager(galaxy_client)
+
+        return await invocation_service.cancel_invocation(
+            invocation_id=invocation_id,
+            username=username,
+            workflow_manager=workflow_manager
+        )
+    except Exception as e:
+        logger.error(f"Failed to cancel invocation: {e}")
+        raise InternalServerErrorException("Failed to cancel invocation")
+
+
 @router.delete(
     "/DELETE",
     summary="Delete workflow invocations",
