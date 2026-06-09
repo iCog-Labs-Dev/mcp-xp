@@ -418,3 +418,33 @@ class InvocationTracker:
 
         except Exception as e:
             self.log.error(f"Error while deleting invocation: {e}")
+
+    async def cancel_invocation(
+        self,
+        invocation_id: str,
+        workflow_manager: WorkflowManager,
+        username: str,
+        mongo_client: MongoStore
+    ):
+        """Cancel a running invocation without deleting any data."""
+        _invocation = await asyncio.to_thread(
+            workflow_manager.gi_object.invocations.get,
+            id_=invocation_id
+        )
+
+        terminal_states = {'cancelled', 'failed', 'scheduled', 'error'}
+        if _invocation.state not in terminal_states:
+            await asyncio.to_thread(
+                workflow_manager.gi_object.gi.invocations.cancel_invocation,
+                invocation_id=invocation_id
+            )
+
+        await asyncio.gather(
+            self.cache.set_invocation_state(username, invocation_id, InvocationStates.FAILED.value),
+            mongo_client.set_element(
+                collection_name=CollectionNames.INVOCATION_STATES.value,
+                key=username,
+                field=invocation_id,
+                value=InvocationStates.FAILED.value
+            )
+        )

@@ -468,6 +468,46 @@ class InvocationService:
         except Exception as e:
             raise InternalServerErrorException("Failed to delete invocations")
     
+    async def cancel_invocation(
+        self,
+        invocation_id: str,
+        username: str,
+        workflow_manager: WorkflowManager
+    ) -> None:
+        """Cancel a running invocation; preserves data, updates state to Failed."""
+        try:
+            deleted = await self.cache.get_deleted_invocations(username)
+            if not deleted:
+                deleted = await self.mongo_client.get(
+                    collection_name=CollectionNames.DELETED_INVOCATIONS.value, key=username
+                ) or []
+            if invocation_id in deleted:
+                raise NotFoundException("Invocation not found")
+
+            await self.inv_tracker.cancel_invocation(
+                invocation_id=invocation_id,
+                workflow_manager=workflow_manager,
+                username=username,
+                mongo_client=self.mongo_client
+            )
+
+            cached_result = await self.cache.get_invocation_result(username, invocation_id)
+            if cached_result:
+                cached_result["state"] = InvocationStates.FAILED.value
+                asyncio.create_task(
+                    self.cache.set_invocation_result(username, invocation_id, cached_result)
+                )
+
+            asyncio.create_task(self.cache.delete_response_cache(username))
+
+            return Response(status_code=HTTP_204_NO_CONTENT)
+
+        except NotFoundException:
+            raise
+        except Exception as e:
+            self.log.error(f"Failed to cancel invocation {invocation_id}: {e}")
+            raise InternalServerErrorException("Failed to cancel invocation")
+
     async def handle_partial_failure(
         self,
         username: str,
