@@ -348,8 +348,55 @@ async def get_create_galaxy_user_and_key(
         username = username,
         api_token = api_token
     )
-    
-@app.post("/galaxy_auth", 
+
+
+@app.post("/refresh-galaxy-key",
+          response_model=GalaxyUserAccount,
+          tags=["Signup Auth"])
+async def refresh_galaxy_key(
+    email: str = Query(description="Email of the existing Galaxy user whose API key to refresh.")
+) -> GalaxyUserAccount:
+    """Mint a fresh Galaxy API key for an existing user. No password required —
+    uses the admin key to look up the user by email and generate a new key."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            # Look up user by email
+            user_resp = await client.get(
+                f"{GALAXY_URL}/api/users",
+                headers={"x-api-key": os.getenv("GALAXY_API_KEY")},
+                params={"f_email": email}
+            )
+            user_resp.raise_for_status()
+            users = user_resp.json()
+            if not users:
+                logger.error(f"refresh-galaxy-key: no Galaxy user for {email}")
+                raise UnauthorizedException(f"Galaxy user {email} not found")
+            galaxy_user_id = users[0]["id"]
+            username = users[0]["username"]
+
+            # Mint new API key
+            key_resp = await client.post(
+                f"{GALAXY_URL}/api/users/{galaxy_user_id}/api_key",
+                headers={"x-api-key": os.getenv("GALAXY_API_KEY")},
+                json={"name": "refresh"}
+            )
+            key_resp.raise_for_status()
+            api_key = key_resp.json()
+
+        # Encrypt with Fernet (same format as register-user)
+        payload = json.dumps({"apikey": api_key}).encode("utf-8")
+        api_token = fernet.encrypt(payload).decode("utf-8")
+        logger.info(f"refresh-galaxy-key: fresh API key issued for {username}")
+        return GalaxyUserAccount(username=username, api_token=api_token)
+
+    except UnauthorizedException:
+        raise
+    except Exception as e:
+        logger.error(f"refresh-galaxy-key failed for {email}: {e}")
+        raise InternalServerErrorException("Failed to refresh Galaxy API key")
+
+
+@app.post("/galaxy_auth",
           tags =["Signup Auth"]
           )
 async def galaxy_proxy_login(request: Request):

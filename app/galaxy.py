@@ -1,7 +1,10 @@
 import os
 import logging
 from typing import Optional
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
+import httpx
+import requests
 from dotenv import load_dotenv
 from bioblend import galaxy
 from bioblend.galaxy.objects import GalaxyInstance
@@ -15,16 +18,68 @@ from tenacity import (
     retry_if_exception_type
     )
 
+from app.context import current_user_email
+
 load_dotenv()
+
+
+class _AutoRefreshSession(requests.Session):
+    """Intercepts all bioblend requests. On 'API key expired' (Galaxy err_code
+    401001), refreshes the user's Galaxy API key via the admin key and retries
+    the request once with the new key swapped into the URL / headers.
+    """
+
+    def __init__(self, owner: "GalaxyClient"):
+        super().__init__()
+        self._owner = owner
+        self._refreshing = False  # prevent recursive refresh
+
+    def send(self, request, **kwargs):
+        response = super().send(request, **kwargs)
+        if response.status_code == 401 and not self._refreshing:
+            try:
+                body = response.json()
+            except Exception:
+                body = {}
+            if (body.get("err_code") == 401001
+                    and "expired" in body.get("err_msg", "").lower()):
+                self._refreshing = True
+                try:
+                    new_key = self._owner._refresh_user_key()
+                    request.url = _replace_key_in_url(request.url, new_key)
+                    if "x-api-key" in request.headers:
+                        request.headers["x-api-key"] = new_key
+                    response = super().send(request, **kwargs)
+                except Exception as e:
+                    self._owner.logger.warning(f"Auto-refresh failed: {e}")
+                finally:
+                    self._refreshing = False
+        return response
+
+
+def _replace_key_in_url(url: str, new_key: str) -> str:
+    """Swap ?key=... in URL with the new API key (bioblend's auth pattern)."""
+    parts = urlparse(url)
+    q = parse_qs(parts.query, keep_blank_values=True)
+    if "key" in q:
+        q["key"] = [new_key]
+    return urlunparse(parts._replace(query=urlencode(q, doseq=True)))
+
 
 class GalaxyClient:
     """Client wrapper for interacting with a Galaxy instance (production-ready)."""
 
-    def __init__(self, user_api_key: str, galaxy_url: Optional[str] = None):
+    def __init__(
+        self,
+        user_api_key: str,
+        galaxy_url: Optional[str] = None,
+        user_email: Optional[str] = None,
+    ):
         # Load configuration
         self.galaxy_url: str = galaxy_url or os.getenv("GALAXY_URL", "")
         self.admin_api_key: Optional[str] = os.getenv("GALAXY_API_KEY")
         self.user_api_key: str = user_api_key
+        self.user_email: Optional[str] = user_email or current_user_email.get(None)
 
         # Retry and logger config
         self.max_retries: int = 3
@@ -36,37 +91,74 @@ class GalaxyClient:
             raise ValueError("User API key must be provided to GalaxyClient.")
         if not self.admin_api_key:
             self.logger.warning("GALAXY_API_KEY (admin) is not set. Admin functionalities will fail.")
+        if not self.user_email:
+            self.logger.warning("user_email not provided; auto-refresh of expired keys will be disabled.")
 
         try:
-            # Admin client (optional)
-            self.gi_admin: Optional[GalaxyInstance] = (
-                GalaxyInstance(url=self.galaxy_url, api_key=self.admin_api_key)
-                if self.admin_api_key else None
-            )
-
-            # User client (required)
-            self.gi_object: GalaxyInstance = GalaxyInstance(
-                url=self.galaxy_url, api_key=self.user_api_key
-            )
-
-            # Set galaxy client
-            self.gi_client = self.gi_object.gi
-
-            # Config client
-            self.config_client = galaxy.config.ConfigClient(self.gi_client)
-
+            self._init_gi()
             self.logger.info(
                 "GalaxyClient initialized for %s (retries=%s)",
                 self.galaxy_url, self.max_retries
             )
-            
         except GalaxyConnectionError as e:
             self.logger.error(f"Failed to connect to Galaxy at {self.galaxy_url}: {e}")
             raise GalaxyConnectionError(f"Failed to connect to Galaxy at {self.galaxy_url}: {e}") from e
         except Exception as e:
             self.logger.error(f"Unexpected error initializing GalaxyClient: {e}")
             raise Exception(f"Unexpected error initializing GalaxyClient: {e}") from e
-    
+
+    def _init_gi(self):
+        """Build admin + user GalaxyInstance and wire the auto-refresh session."""
+        self.gi_admin: Optional[GalaxyInstance] = (
+            GalaxyInstance(url=self.galaxy_url, api_key=self.admin_api_key)
+            if self.admin_api_key else None
+        )
+        self.gi_object: GalaxyInstance = GalaxyInstance(
+            url=self.galaxy_url, api_key=self.user_api_key
+        )
+        self.gi_client = self.gi_object.gi
+        # Replace bioblend's session with our auto-refresh session so every
+        # bioblend HTTP call goes through the refresh logic.
+        self.gi_client.session = _AutoRefreshSession(self)
+        self.config_client = galaxy.config.ConfigClient(self.gi_client)
+
+    def _refresh_user_key(self) -> str:
+        """Mint a fresh user API key using the admin key. Requires user_email."""
+        if not self.user_email or not self.admin_api_key:
+            raise RuntimeError(
+                "Cannot auto-refresh API key: user_email or admin_api_key missing"
+            )
+        self.logger.info(f"Refreshing expired Galaxy API key for {self.user_email}")
+        headers = {"x-api-key": self.admin_api_key}
+        with httpx.Client(timeout=5.0) as c:
+            r = c.get(
+                f"{self.galaxy_url}/api/users",
+                headers=headers,
+                params={"f_email": self.user_email},
+            )
+            r.raise_for_status()
+            users = r.json()
+            if not users:
+                raise RuntimeError(f"No Galaxy user found for email {self.user_email}")
+            uid = users[0]["id"]
+            r = c.post(
+                f"{self.galaxy_url}/api/users/{uid}/api_key",
+                headers=headers,
+                json={"name": "auto-refresh"},
+            )
+            r.raise_for_status()
+            new_key = r.json()
+
+        # Swap the key in-place and rebuild gi_object so subsequent calls use it
+        self.user_api_key = new_key
+        old_session = self.gi_client.session
+        self.gi_object = GalaxyInstance(url=self.galaxy_url, api_key=new_key)
+        self.gi_client = self.gi_object.gi
+        self.gi_client.session = old_session  # keep the auto-refresh hook
+        self.config_client = galaxy.config.ConfigClient(self.gi_client)
+        self.logger.info(f"Galaxy API key refreshed for {self.user_email}")
+        return new_key
+
     @property
     def whoami(self) -> str:
         """
@@ -92,14 +184,12 @@ class GalaxyClient:
                     self.logger.error("Network error fetching user identity: API key expired. Re-authentication required to refresh the token.")
                 else:
                     self.logger.error("Network error fetching user identity: %s", e)
-
                 raise
             except Exception as e:
                 self.logger.exception("Unexpected error in whoami: %s", e)
-                raise 
+                raise
 
         return _whoami()
-
 
     def validate_connection(self) -> bool:
         """

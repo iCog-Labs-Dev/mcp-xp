@@ -18,7 +18,7 @@ from starlette.types import ASGIApp
 from starlette.status import HTTP_204_NO_CONTENT
 
 import jwt
-from app.context import current_api_key
+from app.context import current_api_key, current_user_email
 
 from app.exceptions import UnauthorizedException
 
@@ -45,7 +45,7 @@ class JWTGalaxyKeyMiddleware(BaseHTTPMiddleware):
                 self.log.info("Skipping options method")
                 return await call_next(request)
             
-            public_paths = {"/", "/docs", "/redoc", "/openapi.json", "/register-user"}
+            public_paths = {"/", "/docs", "/redoc", "/openapi.json", "/register-user", "/refresh-galaxy-key"}
             if request.url.path in public_paths or request.url.path.startswith("/static/"):
                 return await call_next(request)
 
@@ -82,6 +82,7 @@ class JWTGalaxyKeyMiddleware(BaseHTTPMiddleware):
 
             # set the context for downstream handlers
             current_api_key.set(apikey)
+            current_user_email.set(payload.get("email"))
             return await call_next(request)
         
         except UnauthorizedException as e:
