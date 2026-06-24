@@ -113,8 +113,10 @@ class WorkflowInstaller:
         we call `repair_repository_revision` to force Galaxy to re-fetch files and
         re-resolve dependencies before our own install call runs."""
         try:
+            # gi.tool_shed_repositories manages locally installed repos (has repair).
+            # gi.toolshed is for talking to the remote Tool Shed (no repair).
             repos = await asyncio.to_thread(
-                self.gi_admin.gi.toolshed.get_repositories
+                self.gi_admin.gi.tool_shed_repositories.get_repositories
             )
             for r in repos:
                 if not (r.get('name') == toolshed_info['name']
@@ -137,7 +139,7 @@ class WorkflowInstaller:
                     )
                     try:
                         await asyncio.to_thread(
-                            self.gi_admin.gi.toolshed.repair_repository_revision,
+                            self.gi_admin.gi.tool_shed_repositories.repair_repository_revision,
                             tool_shed_url=f'https://{toolshed_info["tool_shed"]}',
                             name=toolshed_info['name'],
                             owner=toolshed_info['owner'],
