@@ -98,11 +98,71 @@ class WorkflowInstaller:
                 return False
 
         return True
-    
+
+    async def _ensure_repository_installable(self, step: dict, toolshed_info: dict) -> None:
+        """Detect 'ghost installs' before attempting install.
+
+        Galaxy's `tool_shed_repositories` table can mark a repository revision as
+        `Installed` even when files were never downloaded, conda env never resolved,
+        or the install was interrupted. In those cases, `install_repository_revision`
+        silently no-ops because the DB row already exists.
+
+        We cross-check the DB status against `_tool_exists` (which queries the
+        in-memory toolbox). If the row claims Installed but the tool isn't actually
+        loaded, OR the row is in an explicitly bad state (Error/Uninstalled/New),
+        we call `repair_repository_revision` to force Galaxy to re-fetch files and
+        re-resolve dependencies before our own install call runs."""
+        try:
+            repos = await asyncio.to_thread(
+                self.gi_admin.gi.toolshed.get_repositories
+            )
+            for r in repos:
+                if not (r.get('name') == toolshed_info['name']
+                        and r.get('owner') == toolshed_info['owner']
+                        and r.get('changeset_revision') == toolshed_info['changeset_revision']):
+                    continue
+
+                status = r.get('status', '')
+                tool_actually_present = await self._tool_exists(step)
+
+                needs_repair = (
+                    status in ('Error', 'Uninstalled', 'New')
+                    or (status == 'Installed' and not tool_actually_present)
+                )
+
+                if needs_repair:
+                    self.log.warning(
+                        f"Repo {toolshed_info['name']}@{toolshed_info['changeset_revision']} "
+                        f"status='{status}' but tool present={tool_actually_present} — repairing"
+                    )
+                    try:
+                        await asyncio.to_thread(
+                            self.gi_admin.gi.toolshed.repair_repository_revision,
+                            tool_shed_url=f'https://{toolshed_info["tool_shed"]}',
+                            name=toolshed_info['name'],
+                            owner=toolshed_info['owner'],
+                            changeset_revision=toolshed_info['changeset_revision'],
+                        )
+                    except Exception as repair_err:
+                        self.log.warning(
+                            f"repair_repository_revision failed for "
+                            f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}: {repair_err}. "
+                            f"Falling through to install attempt."
+                        )
+                return
+        except Exception as e:
+            # Best-effort: if we can't enumerate repos, don't block the install path.
+            self.log.debug(f"Repo state check skipped: {e}")
+
     # Function that installs tools missing in the galaxy instance for the workflow invocation
-    # Need  administrator api        
+    # Need  administrator api
     async def _tool_check_install(self, step: dict, ws_manager: SocketManager, tracker_id: str):
-        """Check and install if a tool in a workflow is missing"""
+        """Check and install if a tool in a workflow is missing.
+
+        After install, re-verifies the exact revision is present by reloading the toolbox
+        and re-checking up to 6 times (~60s). The Tool Shed API can return "already
+        installed" while a different revision is the one actually installed, so the
+        response message alone is not trustworthy."""
 
         # Recurse into subworkflow steps
         if step.get('type') == 'subworkflow':
@@ -114,52 +174,66 @@ class WorkflowInstaller:
         if not step.get('tool_id'):
             return
 
-        # Check if tool is already installed
-        if not await self._tool_exists(step):
-            self.log.info(f"Installing tool for step {step['id']}")
-            toolshed_info = step['tool_shed_repository']
-            try:
-                install_result = await self._install_galaxy_tool(toolshed_info)
+        # Already present at the right revision — nothing to do
+        if await self._tool_exists(step):
+            return
 
-                if isinstance(install_result, dict):
-                    self.log.info(f"status: {install_result.get('status')}, message: {install_result.get('message')}")
-                    if ws_manager:
-                        await ws_manager.broadcast(
-                            event= SocketMessageEvent.workflow_upload.value,
-                            data = {
-                                "type": SocketMessageType.TOOL_INSTALL.value,
-                                "payload": {"message": f"{install_result.get('message')}"}
-                            },
-                            tracker_id = tracker_id
-                        )
+        toolshed_info = step['tool_shed_repository']
+        self.log.info(f"Installing tool for step {step['id']}: {step['tool_id']}")
 
-                elif isinstance(install_result, list):
-                    for repo_info in install_result:
-                        status = repo_info.get('status', 'unknown')
-                        error_msg = repo_info.get('error_message', 'None') if status != 'installed' else 'None'
+        # Repair stale/ghost DB rows so the install call below actually runs
+        # instead of being silently shortcut by the Tool Shed API.
+        await self._ensure_repository_installable(step, toolshed_info)
 
-                        self.log.info(f"Tool Name: {repo_info.get('name', 'N/A')}, installed successfully.")
-                        self.log.debug(
-                            f"Name: {repo_info.get('name', 'N/A')}, "
-                            f"Owner: {repo_info.get('owner', 'N/A')}, "
-                            f"Status: {status}, "
-                            f"Error: {error_msg}"
-                        )
-                        if ws_manager:
-                            await ws_manager.broadcast(
-                                event=SocketMessageEvent.workflow_upload.value,
-                                data = {
-                                    "type" : SocketMessageType.TOOL_INSTALL.value,
-                                    "payload" : {"message": f"Tool Name: {repo_info.get('name', 'N/A')}, installed successfully."}
-                                },
-                                tracker_id = tracker_id
-                                )
+        try:
+            await self._install_galaxy_tool(toolshed_info)
+        except Exception as e:
+            self.log.error(f"Failed to install tool '{toolshed_info['name']}': {str(e)}  traceback:{traceback.format_exc()}")
+            if ws_manager:
+                await ws_manager.broadcast(
+                    event=SocketMessageEvent.workflow_upload.value,
+                    data={
+                        "type": SocketMessageType.TOOL_INSTALL.value,
+                        "payload": {"message": f"Failed to install {toolshed_info['name']}: {e}"}
+                    },
+                    tracker_id=tracker_id,
+                )
+            raise
 
-            except Exception as e:
-                self.log.error(f"Failed to install tool '{toolshed_info['name']}': {str(e)}  traceback:{traceback.format_exc()}")
-                raise
-        else:
-            pass
+        # Post-install verification: reload toolbox and confirm the exact
+        # revision is present. Galaxy may need a moment for conda resolution.
+        for attempt in range(6):  # up to ~60s total
+            await self._reload_toolbox()
+            if await self._tool_exists(step):
+                self.log.info(f"Verified install of {step['tool_id']}")
+                if ws_manager:
+                    await ws_manager.broadcast(
+                        event=SocketMessageEvent.workflow_upload.value,
+                        data={
+                            "type": SocketMessageType.TOOL_INSTALL.value,
+                            "payload": {"message": f"Tool Name: {toolshed_info.get('name', 'N/A')}, installed successfully."}
+                        },
+                        tracker_id=tracker_id,
+                    )
+                return
+            await asyncio.sleep(10)
+
+        msg = (
+            f"Tool {step['tool_id']} not present after install + 60s wait. "
+            f"A different revision of '{toolshed_info['name']}' may be installed; "
+            f"uninstall the existing revision and retry, or install manually."
+        )
+        self.log.error(msg)
+        if ws_manager:
+            await ws_manager.broadcast(
+                event=SocketMessageEvent.workflow_upload.value,
+                data={
+                    "type": SocketMessageType.TOOL_INSTALL.value,
+                    "payload": {"message": msg}
+                },
+                tracker_id=tracker_id,
+            )
+        raise RuntimeError(msg)
     
     async def upload_workflow(self, workflow_json: dict, ws_manager: SocketManager = None, tracker_id: str = None, retry_count: int = 1, installer_count = 1):
         """Upload workflow from a ga file json."""
@@ -229,14 +303,15 @@ class WorkflowInstaller:
             await asyncio.to_thread(self.gi_object.gi.workflows.delete_workflow, workflow_id=workflow_id)
             if retry_count > 3:
                 self.log.error("Workflow is not runnable, failed to upload correctly.")
-                await ws_manager.broadcast(
-                    event = SocketMessageEvent.workflow_upload.value,
-                    data = {
-                        "type": SocketMessageType.UPLOAD_FAILURE.value,
-                        "payload": {"message": "Workflow upload failed."}
-                        },
-                    tracker_id=tracker_id
-                    )
+                if ws_manager:
+                    await ws_manager.broadcast(
+                        event = SocketMessageEvent.workflow_upload.value,
+                        data = {
+                            "type": SocketMessageType.UPLOAD_FAILURE.value,
+                            "payload": {"message": "Workflow upload failed."}
+                            },
+                        tracker_id=tracker_id
+                        )
             else:
                 self.log.error(f"Workflow is not runnable, failed to upload correctly. Retrying... (attempt {retry_count})")
                 await asyncio.sleep(NumericLimits.SHORT_SLEEP.value)
