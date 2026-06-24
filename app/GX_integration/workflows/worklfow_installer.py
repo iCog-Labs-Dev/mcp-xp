@@ -2,6 +2,7 @@ import logging
 import asyncio
 import traceback
 
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -113,10 +114,12 @@ class WorkflowInstaller:
         we call `repair_repository_revision` to force Galaxy to re-fetch files and
         re-resolve dependencies before our own install call runs."""
         try:
-            # gi.tool_shed_repositories manages locally installed repos (has repair).
-            # gi.toolshed is for talking to the remote Tool Shed (no repair).
+            # gi.toolShed (camelCase) is bioblend's local installed-repos client.
+            # gi.toolshed (lowercase) is for the remote Tool Shed and lacks
+            # installed-repo introspection. (Attribute name varies by bioblend
+            # version; toolShed is what this codebase ships with.)
             repos = await asyncio.to_thread(
-                self.gi_admin.gi.tool_shed_repositories.get_repositories
+                self.gi_admin.gi.toolShed.get_repositories
             )
             for r in repos:
                 if not (r.get('name') == toolshed_info['name']
@@ -137,17 +140,32 @@ class WorkflowInstaller:
                         f"Repo {toolshed_info['name']}@{toolshed_info['changeset_revision']} "
                         f"status='{status}' but tool present={tool_actually_present} — repairing"
                     )
+                    # bioblend in this version lacks `repair_repository_revision`,
+                    # so call Galaxy's HTTP API directly. The endpoint forces a
+                    # re-fetch of files and re-resolution of conda envs for the
+                    # specified changeset, regardless of the stale DB row.
                     try:
-                        await asyncio.to_thread(
-                            self.gi_admin.gi.tool_shed_repositories.repair_repository_revision,
-                            tool_shed_url=f'https://{toolshed_info["tool_shed"]}',
-                            name=toolshed_info['name'],
-                            owner=toolshed_info['owner'],
-                            changeset_revision=toolshed_info['changeset_revision'],
-                        )
+                        admin_key = self.galaxy_client.admin_api_key
+                        galaxy_url = self.galaxy_client.galaxy_url
+                        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+                            resp = await client.post(
+                                f"{galaxy_url}/api/tool_shed_repositories/repair_repository_revision",
+                                headers={"x-api-key": admin_key},
+                                json={
+                                    "tool_shed_url": f'https://{toolshed_info["tool_shed"]}',
+                                    "name": toolshed_info['name'],
+                                    "owner": toolshed_info['owner'],
+                                    "changeset_revision": toolshed_info['changeset_revision'],
+                                },
+                            )
+                            resp.raise_for_status()
+                            self.log.info(
+                                f"Repair API call accepted for "
+                                f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}"
+                            )
                     except Exception as repair_err:
                         self.log.warning(
-                            f"repair_repository_revision failed for "
+                            f"Repair HTTP call failed for "
                             f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}: {repair_err}. "
                             f"Falling through to install attempt."
                         )
