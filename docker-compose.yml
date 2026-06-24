@@ -27,6 +27,9 @@ services:
       - mongo
     volumes:
       - ./logs:/app/logs
+    networks:
+      - default
+      - rejuve-network
     restart: unless-stopped
 
   redis:
@@ -69,3 +72,8 @@ volumes:
   vectordata:
   redis_data:
   mongo_data:
+
+networks:
+  default:
+  rejuve-network:
+    external: true
