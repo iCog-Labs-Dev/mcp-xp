@@ -103,18 +103,25 @@ class WorkflowInstaller:
         return True
 
     async def _ensure_repository_installable(self, step: dict, toolshed_info: dict) -> None:
-        """Detect 'ghost installs' before attempting install.
+        """Detect 'ghost installs' and clear the stale DB row so a fresh install runs.
 
         Galaxy's `tool_shed_repositories` table can mark a repository revision as
         `Installed` even when files were never downloaded, conda env never resolved,
         or the install was interrupted. In those cases, `install_repository_revision`
         silently no-ops because the DB row already exists.
 
-        We cross-check the DB status against `_tool_exists` (which queries the
-        in-memory toolbox). If the row claims Installed but the tool isn't actually
-        loaded, OR the row is in an explicitly bad state (Error/Uninstalled/New),
-        we call `repair_repository_revision` to force Galaxy to re-fetch files and
-        re-resolve dependencies before our own install call runs."""
+        Galaxy 25.0 has no `repair_repository_revision` endpoint (removed upstream —
+        confirmed against the running instance's `/openapi.json`). The only remedy
+        for a stuck DB row is to DELETE it via `uninstall_repository`, then let the
+        outer `_tool_check_install` re-issue a fresh install with no stale row to
+        no-op against.
+
+        Uninstall side-effects to be aware of:
+        - `remove_from_disk=true` removes files and conda envs for this repo.
+        - Shared dependencies may be cascaded off; if another healthy repo relied on
+          them, they will be reinstalled on next need. That's an accepted cost of
+          clearing the ghost.
+        """
         try:
             # gi.toolShed (camelCase) is bioblend's local installed-repos client.
             # gi.toolshed (lowercase) is for the remote Tool Shed and lacks
@@ -134,64 +141,50 @@ class WorkflowInstaller:
 
                 repo_deleted = bool(r.get('deleted'))
                 repo_uninstalled = bool(r.get('uninstalled'))
-                needs_repair = (
+                needs_cleanup = (
                     repo_deleted
                     or repo_uninstalled
                     or status in self.UNHEALTHY_REPOSITORY_STATUSES
                     or (status == 'Installed' and not tool_actually_present)
                 )
 
-                if needs_repair:
+                if needs_cleanup:
+                    repo_id = r.get('id')
+                    if not repo_id:
+                        self.log.warning(
+                            f"Cannot uninstall {toolshed_info['name']}@{toolshed_info['changeset_revision']}: "
+                            "matching repo row has no 'id' field. Falling through to install attempt."
+                        )
+                        return
+
                     self.log.warning(
                         f"Repo {toolshed_info['name']}@{toolshed_info['changeset_revision']} "
                         f"status='{status}' deleted={repo_deleted} uninstalled={repo_uninstalled} "
-                        f"tool_present={tool_actually_present} — repairing"
+                        f"tool_present={tool_actually_present} — uninstalling stale row"
                     )
-                    # bioblend in this version lacks `repair_repository_revision`,
-                    # so call Galaxy's HTTP API directly. The endpoint forces a
-                    # re-fetch of files and re-resolution of conda envs for the
-                    # specified changeset, regardless of the stale DB row.
                     try:
                         admin_key = self.galaxy_client.admin_api_key
                         galaxy_url = self.galaxy_client.galaxy_url
-                        # Galaxy's repair route requires the repo id in the path:
-                        #   POST /api/tool_shed_repositories/{id}/repair_repository_revision
-                        # (per https://galaxyproject.org/toolshed/api/)
-                        repo_id = r.get('id')
-                        if not repo_id:
-                            raise RuntimeError(
-                                f"Cannot repair {toolshed_info['name']}@{toolshed_info['changeset_revision']}: "
-                                "matching repo row has no 'id' field."
-                            )
+                        # DELETE /api/tool_shed_repositories/{id}
+                        # remove_from_disk=true cleans DB row + files + conda envs.
+                        # See lib/galaxy/webapps/galaxy/api/tool_shed_repositories.py::uninstall_repository
                         async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
-                            resp = await client.post(
-                                f"{galaxy_url}/api/tool_shed_repositories/{repo_id}/repair_repository_revision",
+                            resp = await client.delete(
+                                f"{galaxy_url}/api/tool_shed_repositories/{repo_id}",
                                 headers={"x-api-key": admin_key},
-                                json={
-                                    "tool_shed_url": f'https://{toolshed_info["tool_shed"]}',
-                                    "name": toolshed_info['name'],
-                                    "owner": toolshed_info['owner'],
-                                    "changeset_revision": toolshed_info['changeset_revision'],
-                                },
+                                params={"remove_from_disk": "true"},
                             )
                             resp.raise_for_status()
                             self.log.info(
-                                f"Repair API call accepted for "
+                                f"Uninstall API call succeeded for "
                                 f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}"
                             )
-                        for _ in range(6):
-                            await self._reload_toolbox()
-                            if await self._tool_exists(step):
-                                self.log.info(
-                                    f"Repair restored tool visibility for "
-                                    f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}"
-                                )
-                                return
-                            await asyncio.sleep(10)
-                    except Exception as repair_err:
+                        # Reload so the outer install path's _tool_exists check sees a clean state.
+                        await self._reload_toolbox()
+                    except Exception as uninstall_err:
                         self.log.warning(
-                            f"Repair HTTP call failed for "
-                            f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}: {repair_err}. "
+                            f"Uninstall HTTP call failed for "
+                            f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}: {uninstall_err}. "
                             f"Falling through to install attempt."
                         )
                 return

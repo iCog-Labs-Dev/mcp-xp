@@ -1,8 +1,14 @@
-"""Enumerate installed tool-shed repositories, flag ghost/broken ones, repair.
+"""Enumerate installed tool-shed repositories, flag ghost/broken ones, uninstall.
 
-Reuses env vars and the repair endpoint the runtime installer uses (see
+Reuses env vars and the same uninstall endpoint the runtime installer uses (see
 app/GX_integration/workflows/worklfow_installer.py::_ensure_repository_installable).
 Standalone — no FastAPI process required.
+
+Galaxy 25.0 has no `repair_repository_revision` endpoint (removed upstream —
+confirmed against the running instance's /openapi.json). The correct remedy
+for a stuck ghost row is DELETE + fresh install. This script performs the
+DELETE; a subsequent workflow submission will trigger the fresh install via
+the runtime installer.
 
 Env (from .env at repo root):
     GALAXY_URL       Galaxy base URL
@@ -10,9 +16,9 @@ Env (from .env at repo root):
 
 Usage:
     uv run python scripts/ghost_installs/sweep.py --list
-    uv run python scripts/ghost_installs/sweep.py --repair
-    uv run python scripts/ghost_installs/sweep.py --repair --verify
-    uv run python scripts/ghost_installs/sweep.py --repair --verify --json
+    uv run python scripts/ghost_installs/sweep.py --uninstall
+    uv run python scripts/ghost_installs/sweep.py --uninstall --verify
+    uv run python scripts/ghost_installs/sweep.py --uninstall --verify --json
 """
 
 import argparse
@@ -21,7 +27,6 @@ import json
 import logging
 import os
 import sys
-import time
 from typing import Any
 
 import httpx
@@ -33,10 +38,9 @@ load_dotenv()
 log = logging.getLogger("ghost_sweep")
 
 UNHEALTHY_STATUSES = {"Error", "Uninstalled", "New"}
-# Galaxy's repair route requires the repo id in the path:
-#   POST /api/tool_shed_repositories/{id}/repair_repository_revision
-# See https://galaxyproject.org/toolshed/api/
-REPAIR_ENDPOINT_TEMPLATE = "/api/tool_shed_repositories/{repo_id}/repair_repository_revision"
+# DELETE /api/tool_shed_repositories/{id}  (remove_from_disk=true)
+# See lib/galaxy/webapps/galaxy/api/tool_shed_repositories.py::uninstall_repository
+UNINSTALL_ENDPOINT_TEMPLATE = "/api/tool_shed_repositories/{repo_id}"
 
 
 def env_or_die(name: str) -> str:
@@ -66,67 +70,32 @@ async def enumerate_repos(gi: GalaxyInstance) -> list[dict[str, Any]]:
     return await asyncio.to_thread(gi.toolShed.get_repositories)
 
 
-async def repair(
+async def uninstall(
     client: httpx.AsyncClient,
     galaxy_url: str,
     admin_key: str,
     repo: dict[str, Any],
 ) -> bool:
     if not repo.get("id"):
-        log.warning("cannot repair %s: repo has no 'id' field", repo_id(repo))
+        log.warning("cannot uninstall %s: repo has no 'id' field", repo_id(repo))
         return False
-    payload = {
-        "tool_shed_url": f"https://{repo['tool_shed']}",
-        "name": repo["name"],
-        "owner": repo["owner"],
-        "changeset_revision": repo["changeset_revision"],
-    }
-    endpoint = REPAIR_ENDPOINT_TEMPLATE.format(repo_id=repo["id"])
+    endpoint = UNINSTALL_ENDPOINT_TEMPLATE.format(repo_id=repo["id"])
     try:
-        resp = await client.post(
+        resp = await client.delete(
             f"{galaxy_url}{endpoint}",
             headers={"x-api-key": admin_key},
-            json=payload,
+            params={"remove_from_disk": "true"},
         )
         resp.raise_for_status()
-        log.info("repair accepted: %s", repo_id(repo))
+        log.info("uninstall accepted: %s", repo_id(repo))
         return True
     except Exception as e:
-        log.warning("repair failed for %s: %s", repo_id(repo), e)
+        log.warning("uninstall failed for %s: %s", repo_id(repo), e)
         return False
 
 
 async def reload_toolbox(gi: GalaxyInstance) -> None:
     await asyncio.to_thread(gi.config.reload_toolbox)
-
-
-async def verify_repo_tools(gi: GalaxyInstance, repo: dict[str, Any]) -> bool:
-    """Best-effort verification: fetch repo detail; every listed tool must resolve.
-
-    A same-name/different-revision case is still counted as failure — matches the
-    runtime installer's post-install check.
-    """
-    try:
-        detail = await asyncio.to_thread(gi.toolShed.show_repository, repo["id"])
-    except Exception as e:
-        log.debug("could not show_repository(%s): %s", repo["id"], e)
-        return False
-
-    tool_ids = detail.get("tool_ids") or []
-    if not tool_ids:
-        return detail.get("status") == "Installed"
-
-    for tid in tool_ids:
-        try:
-            tool = await asyncio.to_thread(gi.tools.show_tool, tid)
-        except Exception:
-            return False
-        if not tool:
-            return False
-        tool_repo = tool.get("tool_shed_repository") or {}
-        if tool_repo.get("changeset_revision") != repo.get("changeset_revision"):
-            return False
-    return True
 
 
 async def run() -> int:
@@ -137,15 +106,14 @@ async def run() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--list", action="store_true", help="list repos and exit")
-    parser.add_argument("--repair", action="store_true", help="attempt repair on unhealthy repos")
-    parser.add_argument("--verify", action="store_true", help="post-repair: reload toolbox and verify tools")
-    parser.add_argument("--concurrency", type=int, default=3, help="parallel repairs (default: 3)")
-    parser.add_argument("--verify-wait", type=int, default=60, help="max seconds to wait for tools after repair (default: 60)")
+    parser.add_argument("--uninstall", action="store_true", help="DELETE unhealthy repos to clear stale DB rows")
+    parser.add_argument("--verify", action="store_true", help="post-uninstall: re-enumerate and confirm targeted repos are gone")
+    parser.add_argument("--concurrency", type=int, default=3, help="parallel uninstalls (default: 3)")
     parser.add_argument("--json", dest="as_json", action="store_true", help="emit JSON summary to stdout")
     args = parser.parse_args()
 
-    if not args.list and not args.repair:
-        parser.error("choose --list or --repair (or both)")
+    if not args.list and not args.uninstall:
+        parser.error("choose --list or --uninstall (or both)")
 
     galaxy_url = env_or_die("GALAXY_URL").rstrip("/")
     admin_key = env_or_die("GALAXY_API_KEY")
@@ -182,59 +150,55 @@ async def run() -> int:
         "unhealthy": len(buckets["unhealthy"]),
         "unknown": len(buckets["unknown"]),
         "unhealthy_repos": [repo_id(r) for r in buckets["unhealthy"]],
-        "repaired": [],
-        "repair_failed": [],
-        "verified": [],
-        "verify_failed": [],
+        "uninstalled": [],
+        "uninstall_failed": [],
+        "still_present": [],
     }
 
-    if not args.repair:
+    if not args.uninstall:
         if args.as_json:
             print(json.dumps(summary, indent=2))
         return 0
 
     sem = asyncio.Semaphore(args.concurrency)
 
-    async def repair_one(client: httpx.AsyncClient, r: dict[str, Any]) -> None:
+    async def uninstall_one(client: httpx.AsyncClient, r: dict[str, Any]) -> None:
         async with sem:
-            ok = await repair(client, galaxy_url, admin_key, r)
-            (summary["repaired"] if ok else summary["repair_failed"]).append(repo_id(r))
+            ok = await uninstall(client, galaxy_url, admin_key, r)
+            (summary["uninstalled"] if ok else summary["uninstall_failed"]).append(repo_id(r))
 
     async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
-        await asyncio.gather(*[repair_one(client, r) for r in buckets["unhealthy"]])
+        await asyncio.gather(*[uninstall_one(client, r) for r in buckets["unhealthy"]])
 
-    if args.verify and summary["repaired"]:
+    if args.verify and summary["uninstalled"]:
         log.info("reloading toolbox before verification")
         await reload_toolbox(gi)
-        await asyncio.sleep(5)
+        await asyncio.sleep(2)
 
-        by_id = {repo_id(r): r for r in buckets["unhealthy"]}
-        pending = set(summary["repaired"])
-        deadline = time.monotonic() + args.verify_wait
-
-        while pending and time.monotonic() < deadline:
-            for rid in list(pending):
-                if await verify_repo_tools(gi, by_id[rid]):
-                    summary["verified"].append(rid)
-                    pending.remove(rid)
-            if pending:
-                await asyncio.sleep(10)
-                await reload_toolbox(gi)
-
-        summary["verify_failed"] = sorted(pending)
+        post_repos = await enumerate_repos(gi)
+        # A repo is considered "gone" if it either disappears from the list, or its
+        # deleted/uninstalled flags are now true.
+        still_active_ids = {
+            r.get("id")
+            for r in post_repos
+            if r.get("id") and not (r.get("deleted") or r.get("uninstalled"))
+        }
+        targeted_by_id = {r["id"]: r for r in buckets["unhealthy"] if r.get("id")}
+        for repo_uid, r in targeted_by_id.items():
+            if repo_uid in still_active_ids:
+                summary["still_present"].append(repo_id(r))
 
     log.info(
-        "done — repaired=%d repair_failed=%d verified=%d verify_failed=%d",
-        len(summary["repaired"]),
-        len(summary["repair_failed"]),
-        len(summary["verified"]),
-        len(summary["verify_failed"]),
+        "done — uninstalled=%d uninstall_failed=%d still_present=%d",
+        len(summary["uninstalled"]),
+        len(summary["uninstall_failed"]),
+        len(summary["still_present"]),
     )
 
     if args.as_json:
         print(json.dumps(summary, indent=2))
 
-    exit_code = 0 if not summary["repair_failed"] and not summary["verify_failed"] else 1
+    exit_code = 0 if not summary["uninstall_failed"] and not summary["still_present"] else 1
     return exit_code
 
 
