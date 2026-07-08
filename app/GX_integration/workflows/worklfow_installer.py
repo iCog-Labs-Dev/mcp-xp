@@ -154,9 +154,18 @@ class WorkflowInstaller:
                     try:
                         admin_key = self.galaxy_client.admin_api_key
                         galaxy_url = self.galaxy_client.galaxy_url
+                        # Galaxy's repair route requires the repo id in the path:
+                        #   POST /api/tool_shed_repositories/{id}/repair_repository_revision
+                        # (per https://galaxyproject.org/toolshed/api/)
+                        repo_id = r.get('id')
+                        if not repo_id:
+                            raise RuntimeError(
+                                f"Cannot repair {toolshed_info['name']}@{toolshed_info['changeset_revision']}: "
+                                "matching repo row has no 'id' field."
+                            )
                         async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
                             resp = await client.post(
-                                f"{galaxy_url}/api/tool_shed_repositories/repair_repository_revision",
+                                f"{galaxy_url}/api/tool_shed_repositories/{repo_id}/repair_repository_revision",
                                 headers={"x-api-key": admin_key},
                                 json={
                                     "tool_shed_url": f'https://{toolshed_info["tool_shed"]}',

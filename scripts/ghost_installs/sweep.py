@@ -33,7 +33,10 @@ load_dotenv()
 log = logging.getLogger("ghost_sweep")
 
 UNHEALTHY_STATUSES = {"Error", "Uninstalled", "New"}
-REPAIR_ENDPOINT = "/api/tool_shed_repositories/repair_repository_revision"
+# Galaxy's repair route requires the repo id in the path:
+#   POST /api/tool_shed_repositories/{id}/repair_repository_revision
+# See https://galaxyproject.org/toolshed/api/
+REPAIR_ENDPOINT_TEMPLATE = "/api/tool_shed_repositories/{repo_id}/repair_repository_revision"
 
 
 def env_or_die(name: str) -> str:
@@ -69,15 +72,19 @@ async def repair(
     admin_key: str,
     repo: dict[str, Any],
 ) -> bool:
+    if not repo.get("id"):
+        log.warning("cannot repair %s: repo has no 'id' field", repo_id(repo))
+        return False
     payload = {
         "tool_shed_url": f"https://{repo['tool_shed']}",
         "name": repo["name"],
         "owner": repo["owner"],
         "changeset_revision": repo["changeset_revision"],
     }
+    endpoint = REPAIR_ENDPOINT_TEMPLATE.format(repo_id=repo["id"])
     try:
         resp = await client.post(
-            f"{galaxy_url}{REPAIR_ENDPOINT}",
+            f"{galaxy_url}{endpoint}",
             headers={"x-api-key": admin_key},
             json=payload,
         )
