@@ -22,6 +22,8 @@ from app.enumerations import (
 
 class WorkflowInstaller:
     """Handles tool installation and workflow upload operations"""
+
+    UNHEALTHY_REPOSITORY_STATUSES = {"Error", "Uninstalled", "New"}
     
     def __init__(self, galaxy_client: GalaxyClient):
 
@@ -130,15 +132,20 @@ class WorkflowInstaller:
                 status = r.get('status', '')
                 tool_actually_present = await self._tool_exists(step)
 
+                repo_deleted = bool(r.get('deleted'))
+                repo_uninstalled = bool(r.get('uninstalled'))
                 needs_repair = (
-                    status in ('Error', 'Uninstalled', 'New')
+                    repo_deleted
+                    or repo_uninstalled
+                    or status in self.UNHEALTHY_REPOSITORY_STATUSES
                     or (status == 'Installed' and not tool_actually_present)
                 )
 
                 if needs_repair:
                     self.log.warning(
                         f"Repo {toolshed_info['name']}@{toolshed_info['changeset_revision']} "
-                        f"status='{status}' but tool present={tool_actually_present} — repairing"
+                        f"status='{status}' deleted={repo_deleted} uninstalled={repo_uninstalled} "
+                        f"tool_present={tool_actually_present} — repairing"
                     )
                     # bioblend in this version lacks `repair_repository_revision`,
                     # so call Galaxy's HTTP API directly. The endpoint forces a
@@ -163,6 +170,15 @@ class WorkflowInstaller:
                                 f"Repair API call accepted for "
                                 f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}"
                             )
+                        for _ in range(6):
+                            await self._reload_toolbox()
+                            if await self._tool_exists(step):
+                                self.log.info(
+                                    f"Repair restored tool visibility for "
+                                    f"{toolshed_info['name']}@{toolshed_info['changeset_revision']}"
+                                )
+                                return
+                            await asyncio.sleep(10)
                     except Exception as repair_err:
                         self.log.warning(
                             f"Repair HTTP call failed for "
