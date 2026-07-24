@@ -327,20 +327,46 @@ class InvocationService:
             
             stored_workflow_id = mapping.get(invocation_id, {}).get('workflow_id')
 
-            # Retrieve workflow description
-            workflow_description_list = await self.cache.get_workflows_cache(username)
-            workflow_description = None
-            
-            if workflow_description_list:
-                for _workflow in workflow_description_list:
+            # Retrieve workflow description. It's usually already in cache
+            # from the /api/workflows warm-up path, but for a newly-scheduled
+            # invocation whose result is fetched BEFORE the workflows cache
+            # is warmed for this workflow_id, that cache is empty and we'd
+            # return 500 on the very first fetch. Mirror the same warm-then-
+            # retry fallback used above for the invocation→workflow mapping
+            # (see lines 319-323): if the initial cache lookup misses, warm
+            # once and read again. Prevents the "first call errors, retry
+            # passes" pattern the platform kept surfacing.
+            def _resolve_workflow_description(workflow_list):
+                if not workflow_list:
+                    return None
+                for _workflow in workflow_list:
                     try:
-                        if stored_workflow_id == _workflow.get("id"):
-                            workflow_description = workflow.WorkflowListItem(**_workflow)
+                        cached_workflow_id = _workflow.get("source_workflow_id", _workflow.get("id"))
+                        if stored_workflow_id == cached_workflow_id:
+                            return workflow.WorkflowListItem(**_workflow)
                     except Exception as e:
-                        self.log.warning(f"coudn't retreive from cache: {e}")
-                        
+                        self.log.warning(f"couldn't retrieve from cache: {e}")
+                return None
+
+            workflow_description_list = await self.cache.get_workflows_cache(username)
+            workflow_description = _resolve_workflow_description(workflow_description_list)
+
             if workflow_description is None:
-                raise InternalServerErrorException("Could not locate workflow description in cache.")
+                self.log.warning(
+                    "workflow description cache miss for workflow_id "
+                    f"{stored_workflow_id}, warming user cache."
+                )
+                await self.background_tasks.warm_user_cache(
+                    token="dummytoken",  # same dummy-token trick used above
+                    api_key=api_key,
+                )
+                workflow_description_list = await self.cache.get_workflows_cache(username)
+                workflow_description = _resolve_workflow_description(workflow_description_list)
+
+            if workflow_description is None:
+                raise InternalServerErrorException(
+                    "Could not locate workflow description in cache after warm attempt."
+                )
 
             inputs_formatted = await self.inv_data_manager.structure_inputs(inv=invocation_details, workflow_manager=workflow_manager)
             
