@@ -1,9 +1,24 @@
+# Each key under `providers:` is a free-form NAME (arbitrary string, chosen
+# by you) referenced by CURRENT_LLM and CURRENT_EMBEDDER env vars.
+#
+# `protocol:` tells the code which SDK to talk to the endpoint with — must
+# be one of gemini / openai / huggingface. That's how you can have a
+# "local_llm" block pointing at a vLLM server (which speaks the OpenAI
+# protocol) alongside the real openai cloud block.
+#
+# `embedding_size:` is the vector dim the model returns; used by the
+# Qdrant collection setup and the sanity-check on every embed call. If
+# omitted, a fallback lookup by embedding_model name kicks in for well-
+# known models (see _EMBEDDING_MODEL_DIMS in informer/utils.py).
+
 providers:
   gemini:
+    protocol: gemini
+    provider: gemini                 # kept for LLMModelConfig backward compat
     base_url: https://generativelanguage.googleapis.com/v1beta/models
     model: gemini-2.0-flash
-    embedding_model: embedding-001
-    provider: gemini
+    embedding_model: text-embedding-004
+    embedding_size: 768
     temperature: 0.7
     max_tokens: 1048576
     top_p: 1
@@ -11,14 +26,39 @@ providers:
     stop: null
 
   openai:
+    protocol: openai
+    provider: openai
     base_url: https://api.openai.com/v1
     model: gpt-4o-mini
     embedding_model: text-embedding-3-small
-    provider: openai
+    embedding_size: 1536
     temperature: 0.7
     max_tokens: 8000
     top_p: 1
     stream: true
     stop: null
+
+  # Example: chat via a self-hosted Gemma at a vLLM endpoint (OpenAI
+  # protocol). Uncomment + set CURRENT_LLM=local_llm to route chat here.
+  # local_llm:
+  #   protocol: openai
+  #   provider: openai
+  #   base_url: http://202.181.159.222:8002/v1
+  #   model: gemma4
+  #   temperature: 0.7
+  #   max_tokens: 8000
+  #   top_p: 1
+  #   stream: true
+  #   stop: null
+
+  # Example: embeddings via a self-hosted Ollama endpoint (OpenAI protocol).
+  # Uncomment + set CURRENT_EMBEDDER=local_embed to route embeds here.
+  # local_embed:
+  #   protocol: openai
+  #   provider: openai
+  #   base_url: http://202.181.159.222:11434/v1
+  #   model: mxbai-embed-large:latest          # placeholder; only embedding_model matters
+  #   embedding_model: mxbai-embed-large:latest
+  #   embedding_size: 1024
 
 default_provider: gemini
