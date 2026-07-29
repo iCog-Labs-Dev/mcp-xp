@@ -233,7 +233,14 @@ class OpenAIProvider(LLMProvider):
         for r in results:
             embeddings.extend(r)
 
-        self.log.info("OpenAI embeddings generated.")
+        if not embeddings:
+            self.log.error(
+                "OpenAI embedding fetch produced no vectors — every batch "
+                "failed. Check base_url / api_key / model name for the "
+                "configured provider block."
+            )
+        else:
+            self.log.info(f"OpenAI embeddings generated ({len(embeddings)} vectors).")
         return embeddings
 
 # TODO: Fix abstraction here, since we are abstracting a configuration that the hugging face model wont be using.
