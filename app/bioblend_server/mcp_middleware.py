@@ -10,6 +10,8 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext, CallNext
 from fastmcp.server.dependencies import get_http_headers
+from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 
 from app.log_setup import configure_logging
 from app.bioblend_server.mcp_context import current_api_key_server
@@ -17,6 +19,18 @@ from app.bioblend_server.mcp_context import current_api_key_server
 configure_logging()
 
 GALAXY_API_TOKEN = "galaxy_api_token"
+
+# Per the MCP spec, initialize + the initialized notification are the pre-auth
+# handshake — clients must speak them before they know what auth the server
+# demands. Guarding them here breaks the whole session with -32601 because
+# fastmcp turns a plain-dict middleware short-circuit into "Method not found".
+_PREAUTH_METHODS = {"initialize", "notifications/initialized", "ping"}
+
+
+def _unauthorized(msg: str) -> McpError:
+    # -32001 is JSON-RPC "server error" range; the MCP client sees a real
+    # error object instead of a spurious "Method not found".
+    return McpError(ErrorData(code=-32001, message=msg))
 
 class JWTGalaxyKeyMiddleware(Middleware):
     """
@@ -30,43 +44,37 @@ class JWTGalaxyKeyMiddleware(Middleware):
         self.log = logging.getLogger(self.__class__.__name__)
 
     async def on_request(self, context: MiddlewareContext, call_next: CallNext):
-        
-        # Get header and validate tokem.        
+        if context.method in _PREAUTH_METHODS:
+            return await call_next(context)
+
         headers = get_http_headers(include_all=True)
         auth = headers.get("Authorization", None) or headers.get("authorization", None)
-        
-        if auth is None:
+
+        if auth is None or not auth.startswith("Bearer "):
             self.log.error("unauthorized, Authorization header with Bearer token is required.")
-            return {"error": "Unauthorized"}
-        
-        if not auth.startswith("Bearer "):
-            self.log.error("unauthorized, Authorization header with Bearer token is required.")
-            return {"error": "Unauthorized"}
+            raise _unauthorized("Missing or malformed Authorization header")
 
         token = auth.split(" ")[1].strip()
         try:
             payload = self._decode_jwt(token)
         except Exception as e:
             self.log.error(f"unauthorized, Invalid JWT: {e}")
-            return {"error": "Unauthorized"}
+            raise _unauthorized("Invalid JWT")
 
-        # Extract the API token claim
         if GALAXY_API_TOKEN not in payload:
             self.log.error("JWT missing API key claim '%s'", GALAXY_API_TOKEN)
-            return {"error": "Unauthorized"}
+            raise _unauthorized("JWT missing api-key claim")
 
         galaxy_jwt_token = payload[GALAXY_API_TOKEN]
         if not galaxy_jwt_token:
             self.log.error("Empty API key claim")
-            return {"error": "Unauthorized"}
+            raise _unauthorized("Empty api-key claim")
 
-        # Try to decrypt claim_value (The fernet token string produced by register-user)
         apikey = await self._decrypt_api_token(galaxy_jwt_token)
 
-        # Set the context for downstream tools/handlers
         current_api_key_server.set(apikey)
         self.log.info("Incoming request to MCP server validated.")
-        
+
         return await call_next(context)
 
     def _decode_jwt(self, token: str) -> dict:
