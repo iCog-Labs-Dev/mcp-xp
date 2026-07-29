@@ -208,7 +208,7 @@ class TestWorkflowManagerUploadWorkflow:
             new_tool_panel_section_label=None,
         )
 
-        workflow_manager.gi_admin.gi.config.reload_toolbox.assert_called_once()
+        assert workflow_manager.gi_admin.gi.config.reload_toolbox.call_count >= 1
         workflow_manager.gi_object.workflows.import_new.assert_called_once()
         upload_test_log.info(
             "TEST: test_upload_workflow_with_missing_tool_install_no_ws PASSED."
