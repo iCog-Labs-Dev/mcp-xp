@@ -72,9 +72,10 @@ bioblend_app = FastMCP(
                             Provide information on Galaxy tools, datasets, workflows, and invocations.
                             Explain failures and recommend fixes.
                             Import recommended workflows when requested.
-                            
+
                             """,
-                    middleware=[JWTGalaxyKeyMiddleware()]
+                    middleware=[JWTGalaxyKeyMiddleware()],
+                    lifespan=mcp_galaxy_lifespan,
                     )
 
 
