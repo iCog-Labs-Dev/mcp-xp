@@ -124,10 +124,10 @@ async def get_galaxy_information_tool(
     
     except GalaxyConnectionError as e:
         logger.error(f"Failed to connect to Galaxy: {e}")
-        return f"Failed to connect to Galaxy: {e}"
+        return DefaultTextResponses(response=f"Failed to connect to Galaxy: {e}")
     except Exception as e:
         logger.error(f"Error in get_galaxy_information_tool: {e}", exc_info=True)
-        return f"An error occurred while fetching Galaxy information: {str(e)}"
+        return DefaultTextResponses(response=f"An error occurred while fetching Galaxy information: {e}")
     
 
 # ========================================================================================================== #
