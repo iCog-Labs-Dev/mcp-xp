@@ -38,27 +38,27 @@ providers:
     stream: true
     stop: null
 
-  # Example: chat via a self-hosted Gemma at a vLLM endpoint (OpenAI
-  # protocol). Uncomment + set CURRENT_LLM=local_llm to route chat here.
-  # local_llm:
-  #   protocol: openai
-  #   provider: openai
-  #   base_url: http://202.181.159.222:8002/v1
-  #   model: gemma4
-  #   temperature: 0.7
-  #   max_tokens: 8000
-  #   top_p: 1
-  #   stream: true
-  #   stop: null
+  # Chat via a self-hosted Gemma at a vLLM endpoint (OpenAI protocol).
+  # Selected when CURRENT_LLM=local_llm.
+  local_llm:
+    protocol: openai
+    provider: openai
+    base_url: http://202.181.159.222:8002/v1
+    model: gemma4
+    temperature: 0.7
+    max_tokens: 8000
+    top_p: 1
+    stream: true
+    stop: null
 
-  # Example: embeddings via a self-hosted Ollama endpoint (OpenAI protocol).
-  # Uncomment + set CURRENT_EMBEDDER=local_embed to route embeds here.
-  # local_embed:
-  #   protocol: openai
-  #   provider: openai
-  #   base_url: http://202.181.159.222:11434/v1
-  #   model: mxbai-embed-large:latest          # placeholder; only embedding_model matters
-  #   embedding_model: mxbai-embed-large:latest
-  #   embedding_size: 1024
+  # Embeddings via a self-hosted Ollama endpoint (OpenAI protocol).
+  # Selected when CURRENT_EMBEDDER=local_embed.
+  local_embed:
+    protocol: openai
+    provider: openai
+    base_url: http://202.181.159.222:11434/v1
+    model: mxbai-embed-large:latest
+    embedding_model: mxbai-embed-large:latest
+    embedding_size: 1024
 
 default_provider: gemini
