@@ -14,7 +14,6 @@
 providers:
   gemini:
     protocol: gemini
-    provider: gemini                 # kept for LLMModelConfig backward compat
     base_url: https://generativelanguage.googleapis.com/v1beta/models
     model: gemini-2.0-flash
     embedding_model: text-embedding-004
@@ -27,7 +26,6 @@ providers:
 
   openai:
     protocol: openai
-    provider: openai
     base_url: https://api.openai.com/v1
     model: gpt-4o-mini
     embedding_model: text-embedding-3-small
@@ -42,7 +40,6 @@ providers:
   # Selected when CURRENT_LLM=local_llm.
   local_llm:
     protocol: openai
-    provider: openai
     base_url: http://202.181.159.222:8002/v1
     model: gemma4
     temperature: 0.7
@@ -55,7 +52,6 @@ providers:
   # Selected when CURRENT_EMBEDDER=local_embed.
   local_embed:
     protocol: openai
-    provider: openai
     base_url: http://202.181.159.222:11434/v1
     model: mxbai-embed-large:latest
     embedding_model: mxbai-embed-large:latest

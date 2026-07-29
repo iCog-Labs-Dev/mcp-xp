@@ -107,17 +107,13 @@ class LLMResponse:
         return providers[provider_name]
 
     def _instantiate(self, provider_name: str) -> LLMProvider:
-        """Build an LLMProvider from a config block, dispatching by `protocol:`.
-
-        Falls back to the block's `provider:` field for backward compat with
-        older configs that pre-date the protocol/name split.
-        """
+        """Build an LLMProvider from a config block, dispatching by `protocol:`."""
         block = self._get_provider_block(provider_name)
-        protocol_str = block.get('protocol') or block.get('provider')
+        protocol_str = block.get('protocol')
         if not protocol_str:
             raise ValueError(
-                f"Provider '{provider_name}' has neither 'protocol' nor "
-                "'provider' set; can't decide which SDK to use."
+                f"Provider '{provider_name}' has no 'protocol' set; "
+                "can't decide which SDK to use."
             )
         try:
             protocol = Protocol(protocol_str)
