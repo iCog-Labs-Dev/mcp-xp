@@ -109,6 +109,16 @@ docker-prune:
 docker-logs:
 	$(COMPOSE) logs -f app
 
+# Tail the host-bind-mounted log files. Survives container restarts/removal
+# (tail -F follows by filename, waits if the file doesn't exist yet).
+logs:
+	tail -F logs/MCP_server.log logs/GX_integration.log
+
+logs-mcp:
+	tail -F logs/MCP_server.log
+
+logs-rest:
+	tail -F logs/GX_integration.log
 
 # Inspect MCP (unchanged)
 mcp-inspect:

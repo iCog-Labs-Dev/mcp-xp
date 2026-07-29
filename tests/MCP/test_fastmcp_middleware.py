@@ -8,6 +8,7 @@ path.append(".")
 
 from cryptography.fernet import Fernet
 from fastmcp.server.middleware import MiddlewareContext
+from mcp.shared.exceptions import McpError
 from unittest.mock import Mock, patch, MagicMock
 
 from app.bioblend_server.mcp_context import current_api_key_server
@@ -62,8 +63,10 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         caplog.set_level(logging.ERROR)
         with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {}
-            result = await middleware.on_request(mock_context, mock_call_next)
-            assert result == {"error": "Unauthorized"}
+            with pytest.raises(McpError) as exc_info:
+                await middleware.on_request(mock_context, mock_call_next)
+            assert exc_info.value.error.code == -32001
+            assert "Missing or malformed Authorization header" in exc_info.value.error.message
             mock_call_next.assert_not_called()
             assert "Authorization header with Bearer token is required" in caplog.text
         mcp_jwt_logger.info("TEST: test_missing_authorization_header PASSED")
@@ -76,8 +79,10 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         invalid_token = "invalid.token.here"
         with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {"Authorization": f"Bearer {invalid_token}"}
-            result = await middleware.on_request(mock_context, mock_call_next)
-            assert result == {"error": "Unauthorized"}
+            with pytest.raises(McpError) as exc_info:
+                await middleware.on_request(mock_context, mock_call_next)
+            assert exc_info.value.error.code == -32001
+            assert "Invalid JWT" in exc_info.value.error.message
             mock_call_next.assert_not_called()
             assert "Invalid JWT" in caplog.text
         mcp_jwt_logger.info("TEST: test_invalid_jwt_token PASSED")
@@ -91,8 +96,10 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         token = jwt.encode(payload, key=None, algorithm="none")
         with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {"Authorization": f"Bearer {token}"}
-            result = await middleware.on_request(mock_context, mock_call_next)
-            assert result == {"error": "Unauthorized"}
+            with pytest.raises(McpError) as exc_info:
+                await middleware.on_request(mock_context, mock_call_next)
+            assert exc_info.value.error.code == -32001
+            assert "JWT missing api-key claim" in exc_info.value.error.message
             mock_call_next.assert_not_called()
             assert "JWT missing API key claim 'galaxy_api_token'" in caplog.text
         mcp_jwt_logger.info("TEST: test_jwt_missing_galaxy_api_token_claim PASSED")
@@ -106,8 +113,10 @@ class TestFastMCPJWTGalaxyKeyMiddleware:
         token = jwt.encode(payload, key=None, algorithm="none")
         with patch('app.bioblend_server.mcp_middleware.get_http_headers') as mock_headers:
             mock_headers.return_value = {"Authorization": f"Bearer {token}"}
-            result = await middleware.on_request(mock_context, mock_call_next)
-            assert result == {"error": "Unauthorized"}
+            with pytest.raises(McpError) as exc_info:
+                await middleware.on_request(mock_context, mock_call_next)
+            assert exc_info.value.error.code == -32001
+            assert "Empty api-key claim" in exc_info.value.error.message
             mock_call_next.assert_not_called()
             assert "Empty API key claim" in caplog.text
         mcp_jwt_logger.info("TEST: test_jwt_with_empty_galaxy_api_token_claim PASSED")
