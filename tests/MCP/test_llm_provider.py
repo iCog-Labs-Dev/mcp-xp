@@ -375,13 +375,20 @@ class TestOpenAIProvider:
 
     @pytest.mark.asyncio
     async def test_openai_embedding_model_error_retry(self, openai_config):
-        """Test embedding generation with error and retry."""
+        """Batch failure falls back to per-item embedding.
+
+        When the initial batch call raises, the provider now retries each item
+        one at a time so a single oversized entity doesn't nuke the whole
+        batch. This test simulates that: first call (batch) raises, subsequent
+        per-item calls succeed, and the final result contains one embedding
+        per input.
+        """
         with patch("app.llm_provider.AsyncOpenAI") as mock_client_class:
             mock_client = AsyncMock()
             mock_client_class.return_value = mock_client
-            
+
             batch = ["text1", "text2"]
-            
+
             call_count = 0
             async def mock_create(**kwargs):
                 nonlocal call_count
@@ -394,17 +401,18 @@ class TestOpenAIProvider:
                     MagicMock(embedding=[0.3, 0.4])
                 ]
                 return mock_response
-            
+
             mock_client.embeddings.create = mock_create
-            
+
             provider = OpenAIProvider(openai_config)
-            
+
             with patch("asyncio.sleep", new_callable=AsyncMock):
                 result = await provider.embedding_model(batch)
-                
-                # First call fails and returns empty list for that batch
-                # The error is caught and logged, but doesn't retry automatically
-                assert len(result) == 0
+
+                # 1 initial batch call (fails) + 2 per-item retry calls (succeed).
+                assert call_count == 3
+                # Every input recovered via per-item retry.
+                assert len(result) == 2
 
     @pytest.mark.asyncio
     async def test_openai_embedding_model_missing_config(self, openai_config):

@@ -21,6 +21,48 @@ from app.llm_config import LLMModelConfig
 from app.config import GEMINI_API_KEY, OPENAI_API_KEY
 from app.utils import _extract_json_from_llm_response
 
+
+# --- Embedding tuning constants ---
+#
+# All empirically chosen for the local embedder path
+# (mxbai-embed-large via ollama's OpenAI-compat endpoint).  Swapping to
+# a cloud embedder with more context and higher concurrency ceilings
+# would justify revisiting these.
+
+# How many items per single batch request to the embedding endpoint.
+# Ollama serializes embeddings per-model internally, so raising this
+# rarely helps throughput; keeping it modest also limits the blast
+# radius when a batch contains an over-limit item and the server 400s
+# the whole request.
+EMBED_BATCH_SIZE = 100
+
+# Number of batch requests allowed in-flight simultaneously.
+# Single-GPU ollama tends to serialize anyway; too high risks
+# server-side rate limiting on cloud providers.
+EMBED_MAX_CONCURRENCY = 5
+
+# Seconds to sleep before falling back to per-item retry after a batch
+# request fails, giving transient network errors a moment to clear.
+EMBED_RETRY_SLEEP_S = 2
+
+# Emit a progress log line every N batches once the total exceeds
+# EMBED_VERBOSE_BATCH_THRESHOLD.
+EMBED_PROGRESS_LOG_INTERVAL = 10
+
+# For runs with this-many-or-fewer batches, log every batch (chatty but
+# useful on small runs).  Above this, throttle to
+# EMBED_PROGRESS_LOG_INTERVAL.
+EMBED_VERBOSE_BATCH_THRESHOLD = 20
+
+# Cap on per-item content sent to the embedder.  mxbai-embed-large tops
+# out at ~512 tokens; Galaxy tool XML and JSON-heavy content packs more
+# tokens per char than the English-prose rule of thumb, so a conservative
+# bound is safer.  Anything longer gets truncated with a "…" suffix; the
+# per-item retry path in OpenAIProvider catches whatever still slips
+# through.  Empirically: 1200 dropped 2 items out of 16,811.
+EMBED_MAX_INPUT_CHARS = 1200
+
+
 # Abstract Provider Base Class
 class LLMProvider(ABC):
     def __init__(self, model_config: LLMModelConfig) -> None:
@@ -194,35 +236,89 @@ class OpenAIProvider(LLMProvider):
         - Returns a flat list of embeddings
         - Async native calls
         """
-        
 
         embeddings: List[List[float]] = []
-        batch_size = 100
-        sleep_time = 2  # Time to wait before retrying after an error
-
+        batch_size = EMBED_BATCH_SIZE
+        sleep_time = EMBED_RETRY_SLEEP_S
 
         embedding_model = self.config.config_data.get("embedding_model")
         if not embedding_model:
             raise ValueError("Missing 'embedding_model' in config_data")
 
-        sem = asyncio.Semaphore(5)  # limit concurrency to avoid rate limit spikes
+        sem = asyncio.Semaphore(EMBED_MAX_CONCURRENCY)
 
-        async def fetch_batch(batch_segment):
+        total = len(batch)
+        n_batches = (total + batch_size - 1) // batch_size
+        # Progress counter shared across concurrent fetch_batch coroutines. Wrapped
+        # in a list so the closure can mutate it under the lock; asyncio's
+        # single-threaded semantics still make the read+increment safe.
+        progress = [0]
+        progress_lock = asyncio.Lock()
+
+        self.log.info(
+            f"Embedding {total} items across {n_batches} batches of {batch_size}."
+        )
+
+        async def fetch_batch(batch_segment, batch_idx):
             async with sem:
                 try:
                     result = await self.client.embeddings.create(
                         model=embedding_model,
                         input=batch_segment,
                     )
-                    return [e.embedding for e in result.data]
+                    out = [e.embedding for e in result.data]
                 except Exception as e:
-                    self.log.error(f"OpenAI Embedding error: {e}")
-                    await asyncio.sleep(sleep_time)  # backoff before retry
-                    return []
+                    # A whole batch of 100 fails if even one item is oversize —
+                    # ollama's OpenAI adapter rejects the entire request.  Fall
+                    # back to per-item embedding so we lose only the offenders,
+                    # not the whole batch.  Failed items get None sentinels so
+                    # the caller can drop them (rather than silently
+                    # length-mismatching the df).
+                    self.log.warning(
+                        f"[batch {batch_idx}/{n_batches}] failed "
+                        f"({len(batch_segment)} items), retrying per-item to "
+                        f"isolate offender(s): {e}"
+                    )
+                    await asyncio.sleep(sleep_time)
+                    individual: List[List[float] | None] = []
+                    fail_count = 0
+                    for item in batch_segment:
+                        try:
+                            r = await self.client.embeddings.create(
+                                model=embedding_model,
+                                input=[item],
+                            )
+                            individual.append(r.data[0].embedding)
+                        except Exception as e2:
+                            fail_count += 1
+                            self.log.error(
+                                f"[batch {batch_idx}/{n_batches}] single-item "
+                                f"embed failed "
+                                f"(item len={len(item) if isinstance(item, str) else 'n/a'}): {e2}"
+                            )
+                            individual.append(None)
+                    self.log.info(
+                        f"[batch {batch_idx}/{n_batches}] per-item retry done "
+                        f"({len(batch_segment) - fail_count}/{len(batch_segment)} succeeded)."
+                    )
+                    out = individual
+
+                async with progress_lock:
+                    progress[0] += 1
+                    # Log every batch for small runs, throttled on large ones.
+                    if (
+                        n_batches <= EMBED_VERBOSE_BATCH_THRESHOLD
+                        or progress[0] % EMBED_PROGRESS_LOG_INTERVAL == 0
+                        or progress[0] == n_batches
+                    ):
+                        self.log.info(
+                            f"Embedding progress: {progress[0]}/{n_batches} batches complete."
+                        )
+                return out
 
         # Create all batch tasks
         tasks = [
-            fetch_batch(batch[i:i + batch_size])
+            fetch_batch(batch[i:i + batch_size], (i // batch_size) + 1)
             for i in range(0, len(batch), batch_size)
         ]
 
@@ -240,7 +336,10 @@ class OpenAIProvider(LLMProvider):
                 "configured provider block."
             )
         else:
-            self.log.info(f"OpenAI embeddings generated ({len(embeddings)} vectors).")
+            self.log.info(
+                f"OpenAI embeddings generated ({len(embeddings)} vectors from "
+                f"{n_batches} batches)."
+            )
         return embeddings
 
 # TODO: Fix abstraction here, since we are abstracting a configuration that the hugging face model wont be using.

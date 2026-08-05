@@ -13,6 +13,7 @@ from qdrant_client.models import Filter, FieldCondition, MatchText, PointStruct
 
 from app.log_setup import configure_logging
 from app.bioblend_server.informer.utils import LLMResponse
+from app.llm_provider import EMBED_MAX_INPUT_CHARS
 
 class InformerManager:
     """
@@ -83,8 +84,32 @@ class InformerManager:
     async def _generate_embeddings(self, df: pd.DataFrame) -> pd.DataFrame:
         try:
             self.logger.info("Generating vector embeddings for entity content.")
-            df['dense'] = await self.embedder.get_embeddings(df['content'].tolist())
-            self.logger.info(f"Embeddings generated successfully with size {self.embedder.embedding_size}.")
+            contents = [
+                (s[: EMBED_MAX_INPUT_CHARS - 1] + "…")
+                if isinstance(s, str) and len(s) > EMBED_MAX_INPUT_CHARS
+                else s
+                for s in df['content'].tolist()
+            ]
+            raw = await self.embedder.get_embeddings(contents)
+            if len(raw) != len(df):
+                raise ValueError(
+                    f"Embedder returned {len(raw)} vectors for {len(df)} inputs "
+                    "— input/output length mismatch, cannot align to dataframe."
+                )
+            # Drop rows whose embedding failed (per-item retry returned None).
+            keep_mask = [v is not None for v in raw]
+            dropped = len(keep_mask) - sum(keep_mask)
+            if dropped:
+                self.logger.warning(
+                    f"Dropping {dropped} entities that failed to embed "
+                    "(likely oversized content that survived truncation)."
+                )
+            df = df.loc[keep_mask].reset_index(drop=True)
+            df['dense'] = [v for v in raw if v is not None]
+            self.logger.info(
+                f"Embeddings generated successfully with size {self.embedder.embedding_size} "
+                f"({len(df)} rows kept)."
+            )
             return df
         except Exception as e:
             self.logger.error(f"Error generating dense embeddings: {e}")

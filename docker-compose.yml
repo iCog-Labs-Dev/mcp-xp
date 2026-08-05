@@ -27,6 +27,7 @@ services:
       - mongo
     volumes:
       - ./logs:/app/logs
+      - ./state:/app/state
     networks:
       - default
       - rejuve-network
