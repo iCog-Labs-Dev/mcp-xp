@@ -13,6 +13,7 @@ from qdrant_client.models import Filter, FieldCondition, MatchText, PointStruct
 
 from app.log_setup import configure_logging
 from app.bioblend_server.informer.utils import LLMResponse
+from app.llm_provider import EMBED_MAX_INPUT_CHARS
 
 class InformerManager:
     """
@@ -80,20 +81,12 @@ class InformerManager:
             self.logger.error("Invalid data format. Expected a list of dictionaries.")
             raise ValueError("Input data must be a list of dictionaries.")
 
-    # Cap per-entity content before embedding. mxbai-embed-large tops out at
-    # ~512 tokens; Galaxy tool XML and JSON-heavy content packs many tokens
-    # per char, so a conservative bound is safer than the English-prose
-    # rule-of-thumb.  Anything longer gets truncated with a "…" suffix; the
-    # per-item retry path in OpenAIProvider catches whatever still slips
-    # through.
-    _MAX_EMBED_CHARS = 1200
-
     async def _generate_embeddings(self, df: pd.DataFrame) -> pd.DataFrame:
         try:
             self.logger.info("Generating vector embeddings for entity content.")
             contents = [
-                (s[: self._MAX_EMBED_CHARS - 1] + "\u2026")
-                if isinstance(s, str) and len(s) > self._MAX_EMBED_CHARS
+                (s[: EMBED_MAX_INPUT_CHARS - 1] + "…")
+                if isinstance(s, str) and len(s) > EMBED_MAX_INPUT_CHARS
                 else s
                 for s in df['content'].tolist()
             ]

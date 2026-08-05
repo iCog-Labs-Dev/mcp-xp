@@ -21,6 +21,48 @@ from app.llm_config import LLMModelConfig
 from app.config import GEMINI_API_KEY, OPENAI_API_KEY
 from app.utils import _extract_json_from_llm_response
 
+
+# --- Embedding tuning constants ---
+#
+# All empirically chosen for the local embedder path
+# (mxbai-embed-large via ollama's OpenAI-compat endpoint).  Swapping to
+# a cloud embedder with more context and higher concurrency ceilings
+# would justify revisiting these.
+
+# How many items per single batch request to the embedding endpoint.
+# Ollama serializes embeddings per-model internally, so raising this
+# rarely helps throughput; keeping it modest also limits the blast
+# radius when a batch contains an over-limit item and the server 400s
+# the whole request.
+EMBED_BATCH_SIZE = 100
+
+# Number of batch requests allowed in-flight simultaneously.
+# Single-GPU ollama tends to serialize anyway; too high risks
+# server-side rate limiting on cloud providers.
+EMBED_MAX_CONCURRENCY = 5
+
+# Seconds to sleep before falling back to per-item retry after a batch
+# request fails, giving transient network errors a moment to clear.
+EMBED_RETRY_SLEEP_S = 2
+
+# Emit a progress log line every N batches once the total exceeds
+# EMBED_VERBOSE_BATCH_THRESHOLD.
+EMBED_PROGRESS_LOG_INTERVAL = 10
+
+# For runs with this-many-or-fewer batches, log every batch (chatty but
+# useful on small runs).  Above this, throttle to
+# EMBED_PROGRESS_LOG_INTERVAL.
+EMBED_VERBOSE_BATCH_THRESHOLD = 20
+
+# Cap on per-item content sent to the embedder.  mxbai-embed-large tops
+# out at ~512 tokens; Galaxy tool XML and JSON-heavy content packs more
+# tokens per char than the English-prose rule of thumb, so a conservative
+# bound is safer.  Anything longer gets truncated with a "…" suffix; the
+# per-item retry path in OpenAIProvider catches whatever still slips
+# through.  Empirically: 1200 dropped 2 items out of 16,811.
+EMBED_MAX_INPUT_CHARS = 1200
+
+
 # Abstract Provider Base Class
 class LLMProvider(ABC):
     def __init__(self, model_config: LLMModelConfig) -> None:
@@ -196,14 +238,14 @@ class OpenAIProvider(LLMProvider):
         """
 
         embeddings: List[List[float]] = []
-        batch_size = 100
-        sleep_time = 2  # Time to wait before retrying after an error
+        batch_size = EMBED_BATCH_SIZE
+        sleep_time = EMBED_RETRY_SLEEP_S
 
         embedding_model = self.config.config_data.get("embedding_model")
         if not embedding_model:
             raise ValueError("Missing 'embedding_model' in config_data")
 
-        sem = asyncio.Semaphore(5)  # limit concurrency to avoid rate limit spikes
+        sem = asyncio.Semaphore(EMBED_MAX_CONCURRENCY)
 
         total = len(batch)
         n_batches = (total + batch_size - 1) // batch_size
@@ -263,8 +305,12 @@ class OpenAIProvider(LLMProvider):
 
                 async with progress_lock:
                     progress[0] += 1
-                    # Log every batch for small runs, every 10 for large runs.
-                    if n_batches <= 20 or progress[0] % 10 == 0 or progress[0] == n_batches:
+                    # Log every batch for small runs, throttled on large ones.
+                    if (
+                        n_batches <= EMBED_VERBOSE_BATCH_THRESHOLD
+                        or progress[0] % EMBED_PROGRESS_LOG_INTERVAL == 0
+                        or progress[0] == n_batches
+                    ):
                         self.log.info(
                             f"Embedding progress: {progress[0]}/{n_batches} batches complete."
                         )
