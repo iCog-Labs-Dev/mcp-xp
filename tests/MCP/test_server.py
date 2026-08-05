@@ -187,8 +187,8 @@ class TestGetGalaxyInformationTool:
             query="test query", query_type="tool"
         )
 
-        assert "error" in result.lower()
-        assert "current user api-key is missing" in result.lower()
+        assert "error" in result.response.lower()
+        assert "current user api-key is missing" in result.response.lower()
         informer_test_log.info("TEST: test_missing_api_key PASSED")
 
     @pytest.mark.asyncio
@@ -205,8 +205,8 @@ class TestGetGalaxyInformationTool:
             query="test query", query_type="tool"
         )
 
-        assert "error" in result.lower()
-        assert "connection failed" in result.lower()
+        assert "error" in result.response.lower()
+        assert "connection failed" in result.response.lower()
         informer_test_log.info("TEST: test_galaxy_client_exception PASSED.")
 
 

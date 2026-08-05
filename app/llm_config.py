@@ -11,7 +11,6 @@ class LLMModelConfig:
     def __init__(self, config_data: Dict[str, Any]) -> None:
         self.config_data = config_data
         self.model_name: str = config_data["model"]
-        self.provider: str = config_data["provider"]
         self.base_url: str = config_data["base_url"]
         self.embedding_model: str | None = config_data.get("embedding_model")
 
