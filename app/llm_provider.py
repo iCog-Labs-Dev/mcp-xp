@@ -194,12 +194,10 @@ class OpenAIProvider(LLMProvider):
         - Returns a flat list of embeddings
         - Async native calls
         """
-        
 
         embeddings: List[List[float]] = []
         batch_size = 100
         sleep_time = 2  # Time to wait before retrying after an error
-
 
         embedding_model = self.config.config_data.get("embedding_model")
         if not embedding_model:
@@ -207,14 +205,26 @@ class OpenAIProvider(LLMProvider):
 
         sem = asyncio.Semaphore(5)  # limit concurrency to avoid rate limit spikes
 
-        async def fetch_batch(batch_segment):
+        total = len(batch)
+        n_batches = (total + batch_size - 1) // batch_size
+        # Progress counter shared across concurrent fetch_batch coroutines. Wrapped
+        # in a list so the closure can mutate it under the lock; asyncio's
+        # single-threaded semantics still make the read+increment safe.
+        progress = [0]
+        progress_lock = asyncio.Lock()
+
+        self.log.info(
+            f"Embedding {total} items across {n_batches} batches of {batch_size}."
+        )
+
+        async def fetch_batch(batch_segment, batch_idx):
             async with sem:
                 try:
                     result = await self.client.embeddings.create(
                         model=embedding_model,
                         input=batch_segment,
                     )
-                    return [e.embedding for e in result.data]
+                    out = [e.embedding for e in result.data]
                 except Exception as e:
                     # A whole batch of 100 fails if even one item is oversize —
                     # ollama's OpenAI adapter rejects the entire request.  Fall
@@ -223,11 +233,13 @@ class OpenAIProvider(LLMProvider):
                     # the caller can drop them (rather than silently
                     # length-mismatching the df).
                     self.log.warning(
-                        f"OpenAI batch of {len(batch_segment)} failed, retrying "
-                        f"per-item to isolate offender(s): {e}"
+                        f"[batch {batch_idx}/{n_batches}] failed "
+                        f"({len(batch_segment)} items), retrying per-item to "
+                        f"isolate offender(s): {e}"
                     )
                     await asyncio.sleep(sleep_time)
                     individual: List[List[float] | None] = []
+                    fail_count = 0
                     for item in batch_segment:
                         try:
                             r = await self.client.embeddings.create(
@@ -236,16 +248,31 @@ class OpenAIProvider(LLMProvider):
                             )
                             individual.append(r.data[0].embedding)
                         except Exception as e2:
+                            fail_count += 1
                             self.log.error(
-                                f"OpenAI single-item embed failed "
+                                f"[batch {batch_idx}/{n_batches}] single-item "
+                                f"embed failed "
                                 f"(item len={len(item) if isinstance(item, str) else 'n/a'}): {e2}"
                             )
                             individual.append(None)
-                    return individual
+                    self.log.info(
+                        f"[batch {batch_idx}/{n_batches}] per-item retry done "
+                        f"({len(batch_segment) - fail_count}/{len(batch_segment)} succeeded)."
+                    )
+                    out = individual
+
+                async with progress_lock:
+                    progress[0] += 1
+                    # Log every batch for small runs, every 10 for large runs.
+                    if n_batches <= 20 or progress[0] % 10 == 0 or progress[0] == n_batches:
+                        self.log.info(
+                            f"Embedding progress: {progress[0]}/{n_batches} batches complete."
+                        )
+                return out
 
         # Create all batch tasks
         tasks = [
-            fetch_batch(batch[i:i + batch_size])
+            fetch_batch(batch[i:i + batch_size], (i // batch_size) + 1)
             for i in range(0, len(batch), batch_size)
         ]
 
@@ -263,7 +290,10 @@ class OpenAIProvider(LLMProvider):
                 "configured provider block."
             )
         else:
-            self.log.info(f"OpenAI embeddings generated ({len(embeddings)} vectors).")
+            self.log.info(
+                f"OpenAI embeddings generated ({len(embeddings)} vectors from "
+                f"{n_batches} batches)."
+            )
         return embeddings
 
 # TODO: Fix abstraction here, since we are abstracting a configuration that the hugging face model wont be using.
