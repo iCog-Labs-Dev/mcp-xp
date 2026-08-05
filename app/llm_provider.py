@@ -216,9 +216,32 @@ class OpenAIProvider(LLMProvider):
                     )
                     return [e.embedding for e in result.data]
                 except Exception as e:
-                    self.log.error(f"OpenAI Embedding error: {e}")
-                    await asyncio.sleep(sleep_time)  # backoff before retry
-                    return []
+                    # A whole batch of 100 fails if even one item is oversize —
+                    # ollama's OpenAI adapter rejects the entire request.  Fall
+                    # back to per-item embedding so we lose only the offenders,
+                    # not the whole batch.  Failed items get None sentinels so
+                    # the caller can drop them (rather than silently
+                    # length-mismatching the df).
+                    self.log.warning(
+                        f"OpenAI batch of {len(batch_segment)} failed, retrying "
+                        f"per-item to isolate offender(s): {e}"
+                    )
+                    await asyncio.sleep(sleep_time)
+                    individual: List[List[float] | None] = []
+                    for item in batch_segment:
+                        try:
+                            r = await self.client.embeddings.create(
+                                model=embedding_model,
+                                input=[item],
+                            )
+                            individual.append(r.data[0].embedding)
+                        except Exception as e2:
+                            self.log.error(
+                                f"OpenAI single-item embed failed "
+                                f"(item len={len(item) if isinstance(item, str) else 'n/a'}): {e2}"
+                            )
+                            individual.append(None)
+                    return individual
 
         # Create all batch tasks
         tasks = [

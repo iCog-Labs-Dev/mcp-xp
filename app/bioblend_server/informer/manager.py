@@ -81,10 +81,12 @@ class InformerManager:
             raise ValueError("Input data must be a list of dictionaries.")
 
     # Cap per-entity content before embedding. mxbai-embed-large tops out at
-    # ~512 tokens; long Galaxy workflow descriptions overflow that and
-    # ollama's OpenAI adapter 400s the entire batch. ~1800 chars is a safe
-    # English-prose approximation of 512 tokens with headroom.
-    _MAX_EMBED_CHARS = 1800
+    # ~512 tokens; Galaxy tool XML and JSON-heavy content packs many tokens
+    # per char, so a conservative bound is safer than the English-prose
+    # rule-of-thumb.  Anything longer gets truncated with a "…" suffix; the
+    # per-item retry path in OpenAIProvider catches whatever still slips
+    # through.
+    _MAX_EMBED_CHARS = 1200
 
     async def _generate_embeddings(self, df: pd.DataFrame) -> pd.DataFrame:
         try:
@@ -95,8 +97,26 @@ class InformerManager:
                 else s
                 for s in df['content'].tolist()
             ]
-            df['dense'] = await self.embedder.get_embeddings(contents)
-            self.logger.info(f"Embeddings generated successfully with size {self.embedder.embedding_size}.")
+            raw = await self.embedder.get_embeddings(contents)
+            if len(raw) != len(df):
+                raise ValueError(
+                    f"Embedder returned {len(raw)} vectors for {len(df)} inputs "
+                    "— input/output length mismatch, cannot align to dataframe."
+                )
+            # Drop rows whose embedding failed (per-item retry returned None).
+            keep_mask = [v is not None for v in raw]
+            dropped = len(keep_mask) - sum(keep_mask)
+            if dropped:
+                self.logger.warning(
+                    f"Dropping {dropped} entities that failed to embed "
+                    "(likely oversized content that survived truncation)."
+                )
+            df = df.loc[keep_mask].reset_index(drop=True)
+            df['dense'] = [v for v in raw if v is not None]
+            self.logger.info(
+                f"Embeddings generated successfully with size {self.embedder.embedding_size} "
+                f"({len(df)} rows kept)."
+            )
             return df
         except Exception as e:
             self.logger.error(f"Error generating dense embeddings: {e}")
