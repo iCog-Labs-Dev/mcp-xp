@@ -154,17 +154,26 @@ class LLMResponse:
         return self._instantiate(os.getenv("CURRENT_LLM", "gemini"))
         
     async def get_embeddings(self, input):
-        """ Get embeddings for input text. """
-        
+        """Get embeddings for input text.
+
+        Returns one embedding per input, preserving per-input alignment.
+        Entries whose upstream provider call failed (e.g. context-length
+        rejection during the per-item retry path) come back as ``None`` so
+        the caller can drop the corresponding row from its dataframe. The
+        embedding-size sanity check runs only against successful entries.
+        """
         raw = await self.embedder.embedding_model(input)
-        embed= np.array(raw)
-        if embed.shape[-1] != self.embedding_size:
-            raise ValueError(f"Expected embedding dimension {self.embedding_size}, got {embed.shape[-1]}")
-        embeddings = embed.reshape(-1, self.embedding_size)
+        valid = [v for v in raw if v is not None]
+        if valid:
+            embed = np.array(valid)
+            if embed.shape[-1] != self.embedding_size:
+                raise ValueError(
+                    f"Expected embedding dimension {self.embedding_size}, "
+                    f"got {embed.shape[-1]}"
+                )
         if len(input) == 1:
-            return embeddings.tolist()[0]
-        else:
-            return embeddings.tolist()
+            return raw[0]
+        return raw
     
     async def get_response(self, message):
         """Get response from LLM."""
