@@ -80,10 +80,22 @@ class InformerManager:
             self.logger.error("Invalid data format. Expected a list of dictionaries.")
             raise ValueError("Input data must be a list of dictionaries.")
 
+    # Cap per-entity content before embedding. mxbai-embed-large tops out at
+    # ~512 tokens; long Galaxy workflow descriptions overflow that and
+    # ollama's OpenAI adapter 400s the entire batch. ~1800 chars is a safe
+    # English-prose approximation of 512 tokens with headroom.
+    _MAX_EMBED_CHARS = 1800
+
     async def _generate_embeddings(self, df: pd.DataFrame) -> pd.DataFrame:
         try:
             self.logger.info("Generating vector embeddings for entity content.")
-            df['dense'] = await self.embedder.get_embeddings(df['content'].tolist())
+            contents = [
+                (s[: self._MAX_EMBED_CHARS - 1] + "\u2026")
+                if isinstance(s, str) and len(s) > self._MAX_EMBED_CHARS
+                else s
+                for s in df['content'].tolist()
+            ]
+            df['dense'] = await self.embedder.get_embeddings(contents)
             self.logger.info(f"Embeddings generated successfully with size {self.embedder.embedding_size}.")
             return df
         except Exception as e:
