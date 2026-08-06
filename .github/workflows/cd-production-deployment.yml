@@ -1,4 +1,4 @@
-name: CD - Deploy mcp-xp to Kubernetes (production / app.rejuve.bio)
+name: CD - Deploy mcp-xp to Kubernetes (production / app)
 
 on:
   repository_dispatch:
