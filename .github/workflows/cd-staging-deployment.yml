@@ -1,0 +1,91 @@
+name: CD - Deploy mcp-xp to Kubernetes (staging / hetzner)
+
+on:
+  repository_dispatch:
+    types: [deploy-staging]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Debug workflow info
+        run: |
+          echo "Event Type: ${{ github.event.action }}"
+          echo "Image Tag: ${{ github.event.client_payload.image_tag }}"
+          echo "Triggered by: ${{ github.actor }}"
+
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_STAGING }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+          echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+
+      - name: Deploy to Kubernetes
+        run: |
+          set -euo pipefail
+
+          NAMESPACE="mcp-xp-staging"
+          TAG="${{ github.event.client_payload.image_tag }}"
+
+          if [ -z "$TAG" ]; then
+            TAG="staging"
+          fi
+
+          echo "Using image tag: $TAG"
+
+          kubectl set image deployment/mcp-app \
+            mcp-app=rejuvebio/mcp-xp:${TAG} \
+            -n "$NAMESPACE"
+
+      - name: Wait for rollout
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/mcp-app -n mcp-xp-staging --timeout=180s
+
+      - name: Verify all pods
+        run: |
+          kubectl get pods -n mcp-xp-staging
+
+      - name: Send success email
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "CD Pipeline SUCCESS - mcp-xp Deployed to K8s (staging)"
+          to: ${{ secrets.RECIEVER_EMAIL }}
+          from: GitHub Actions <${{ secrets.EMAIL_USERNAME }}>
+          body: |
+            mcp-xp deployment to Kubernetes staging completed successfully!
+
+            Repository: ${{ github.repository }}
+            Triggered by: ${{ github.actor }}
+            Image tag: ${{ github.event.client_payload.image_tag }}
+
+            mcp-app pod updated and running in mcp-xp-staging namespace.
+
+      - name: Send failure email
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "CD Pipeline FAILED - mcp-xp K8s Deploy (staging)"
+          to: ${{ secrets.RECIEVER_EMAIL }}
+          from: GitHub Actions <${{ secrets.EMAIL_USERNAME }}>
+          body: |
+            mcp-xp Kubernetes staging deployment failed!
+
+            Repository: ${{ github.repository }}
+            Triggered by: ${{ github.actor }}
+            Image tag: ${{ github.event.client_payload.image_tag }}
+
+            Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
