@@ -4,6 +4,9 @@ on:
   repository_dispatch:
     types: [deploy-staging]
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: self-hosted
