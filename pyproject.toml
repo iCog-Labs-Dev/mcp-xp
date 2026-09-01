@@ -30,7 +30,7 @@ dependencies = [
     "python-dotenv==1.1.0",
     "python-multipart==0.0.32",
     "PyYAML==6.0.3",
-    "qdrant-client==1.14.3",
+    "qdrant-client==1.19.0",
     "RapidFuzz==3.14.5",
     "redis==6.2.0",
     "requests==2.34.2",
