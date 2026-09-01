@@ -31,7 +31,7 @@ dependencies = [
     "python-multipart==0.0.31",
     "PyYAML==6.0.2",
     "qdrant-client==1.14.3",
-    "RapidFuzz==3.13.0",
+    "RapidFuzz==3.14.5",
     "redis==6.2.0",
     "requests==2.32.3",
     "sentence-transformers==5.1.2",
