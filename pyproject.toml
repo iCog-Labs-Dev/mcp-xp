@@ -19,7 +19,7 @@ dependencies = [
     # (langchain-mcp-adapters 0.1.14) speaks so uv doesn't resolve two
     # incompatible copies against each other.
     "mcp>=1.28.1,<2.0.0",
-    "google-genai==1.68.0",
+    "google-genai==2.20.0",
     "httpx==0.28.1",
     "numpy==2.2.6",
     "openai==1.75.0",
